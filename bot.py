@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import json
 import logging
 import os
 from datetime import datetime, timedelta
@@ -12,23 +11,22 @@ from aiogram.filters import Command
 from aiogram.types import LabeledPrice, PreCheckoutQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# ==================== КОНФИГУРАЦИЯ ====================
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-GITHUB_TOKEN = "YOUR_GITHUB_TOKEN"
-REPO_OWNER = "bdtvyz76b6-blip"
-REPO_NAME = "kainkov"
-BRANCH = "main"
+# ==================== НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ====================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+REPO_OWNER = os.getenv("REPO_OWNER", "bdtvyz76b6-blip")
+REPO_NAME = os.getenv("REPO_NAME", "kainkov")
+BRANCH = os.getenv("BRANCH", "main")
 
-# Пути в репозитории
-SERVERS_FILE = "servers.txt"
-NO_SERVERS_FILE = "no_servers.txt"
-USERS_DIR = "users"
-REVENUE_FILE = "revenue.txt"
+SERVERS_FILE = os.getenv("SERVERS_FILE", "servers.txt")
+NO_SERVERS_FILE = os.getenv("NO_SERVERS_FILE", "no_servers.txt")
+USERS_DIR = os.getenv("USERS_DIR", "users")
+REVENUE_FILE = os.getenv("REVENUE_FILE", "revenue.txt")
 
-# ID администратора (замените на свой)
-ADMIN_ID = 123456789
+TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "2"))
 
-# Цены и длительности
+# Тарифы (цены в Telegram Stars)
 PRICES = {
     "1_month": 100,
     "4_months": 300,
@@ -39,11 +37,9 @@ DURATIONS = {
     "4_months": 120,
     "8_months": 240,
 }
-TRIAL_DAYS = 2
 
 # ==================== GITHUB API ====================
 def github_request(method: str, path: str, data: Optional[dict] = None) -> Optional[dict]:
-    """Универсальный запрос к GitHub API."""
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     headers = {
         "Authorization": f"token {GITHUB_TOKEN}",
@@ -67,19 +63,15 @@ def github_request(method: str, path: str, data: Optional[dict] = None) -> Optio
         return None
 
 def github_get_file(path: str) -> Optional[str]:
-    """Получить содержимое файла из репозитория."""
     data = github_request("GET", path)
     if data and "content" in data:
         try:
-            content = base64.b64decode(data["content"]).decode("utf-8")
-            return content
+            return base64.b64decode(data["content"]).decode("utf-8")
         except:
             pass
     return None
 
 def github_put_file(path: str, content: str, commit_msg: str) -> bool:
-    """Создать или обновить файл."""
-    # Получаем SHA, если файл существует
     existing = github_request("GET", path)
     sha = existing.get("sha") if existing else None
     payload = {
@@ -93,10 +85,9 @@ def github_put_file(path: str, content: str, commit_msg: str) -> bool:
     return result is not None
 
 def github_delete_file(path: str, commit_msg: str) -> bool:
-    """Удалить файл."""
     existing = github_request("GET", path)
     if not existing:
-        return True  # Файл и так отсутствует
+        return True
     payload = {
         "message": commit_msg,
         "sha": existing["sha"],
@@ -107,18 +98,15 @@ def github_delete_file(path: str, commit_msg: str) -> bool:
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def get_user_file_path(user_id: int, kind: str = "paid") -> str:
-    """Путь к файлу пользователя в репозитории."""
     return f"{USERS_DIR}/{kind}_{user_id}.txt"
 
 def read_servers(file_name: str) -> list[str]:
-    """Читает список серверов из файла."""
     content = github_get_file(file_name)
     if content:
         return [line.strip() for line in content.splitlines() if line.strip()]
     return []
 
 def create_user_file(user_id: int, kind: str, servers: list[str], subscription_name: str, expire_date: datetime, traffic: str = "Unlimited") -> bool:
-    """Создаёт файл пользователя с информацией о подписке."""
     path = get_user_file_path(user_id, kind)
     content_lines = servers + [
         "",
@@ -130,7 +118,6 @@ def create_user_file(user_id: int, kind: str, servers: list[str], subscription_n
     return github_put_file(path, content, f"User {user_id} {kind} subscription")
 
 def parse_user_file(content: str) -> Optional[dict]:
-    """Парсит файл пользователя и возвращает данные."""
     lines = content.splitlines()
     servers = []
     subscription_name = None
@@ -162,29 +149,23 @@ def parse_user_file(content: str) -> Optional[dict]:
     }
 
 async def check_and_cleanup_expired(user_id: int):
-    """Проверяет и обрабатывает истёкшие подписки пользователя."""
-    # Проверяем paid подписку
     paid_path = get_user_file_path(user_id, "paid")
     paid_content = github_get_file(paid_path)
     if paid_content:
         parsed = parse_user_file(paid_content)
         if parsed and parsed["expire_date"] < datetime.now():
-            # Подписка истекла - удаляем файл
             github_delete_file(paid_path, f"Expired paid subscription for user {user_id}")
             logging.info(f"Deleted expired paid subscription for user {user_id}")
-    
-    # Проверяем trial подписку (файл не удаляем, но меняем содержимое на expired)
+
     trial_path = get_user_file_path(user_id, "trial")
     trial_content = github_get_file(trial_path)
     if trial_content:
         parsed = parse_user_file(trial_content)
         if parsed and parsed["expire_date"] < datetime.now():
-            # Меняем содержимое на "expired", чтобы отметить использование пробного
             github_put_file(trial_path, "expired", f"Trial expired for user {user_id}")
             logging.info(f"Marked trial as expired for user {user_id}")
 
 async def has_active_subscription(user_id: int) -> bool:
-    """Проверяет, есть ли у пользователя активная платная подписка."""
     await check_and_cleanup_expired(user_id)
     paid_path = get_user_file_path(user_id, "paid")
     content = github_get_file(paid_path)
@@ -195,21 +176,17 @@ async def has_active_subscription(user_id: int) -> bool:
     return False
 
 async def has_trial_used(user_id: int) -> bool:
-    """Проверяет, использовал ли пользователь пробный период."""
     trial_path = get_user_file_path(user_id, "trial")
     return github_get_file(trial_path) is not None
 
 async def get_active_subscription_info(user_id: int) -> Optional[dict]:
-    """Возвращает информацию об активной подписке (paid или trial)."""
     await check_and_cleanup_expired(user_id)
-    # Сначала paid
     paid_path = get_user_file_path(user_id, "paid")
     content = github_get_file(paid_path)
     if content:
         parsed = parse_user_file(content)
         if parsed and parsed["expire_date"] >= datetime.now():
             return parsed
-    # Затем trial
     trial_path = get_user_file_path(user_id, "trial")
     content = github_get_file(trial_path)
     if content and content != "expired":
@@ -219,7 +196,6 @@ async def get_active_subscription_info(user_id: int) -> Optional[dict]:
     return None
 
 def update_revenue(amount: int):
-    """Добавляет сумму в файл дохода."""
     current = github_get_file(REVENUE_FILE)
     if current is None:
         current = "0"
@@ -230,7 +206,6 @@ def update_revenue(amount: int):
     github_put_file(REVENUE_FILE, str(total), "Update revenue")
 
 def get_revenue() -> int:
-    """Возвращает общий доход."""
     content = github_get_file(REVENUE_FILE)
     if content is None:
         return 0
@@ -240,8 +215,6 @@ def get_revenue() -> int:
         return 0
 
 async def get_user_stats() -> dict:
-    """Собирает статистику для админки."""
-    # Получаем список файлов в папке users через Git Trees API
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/git/trees/{BRANCH}?recursive=1"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     resp = requests.get(url, headers=headers)
@@ -253,7 +226,7 @@ async def get_user_stats() -> dict:
         path = item.get("path", "")
         if path.startswith(USERS_DIR + "/"):
             users_files.append(path)
-    
+
     total_users = 0
     active_paid = 0
     active_trial = 0
@@ -261,7 +234,6 @@ async def get_user_stats() -> dict:
         fname = fpath.split("/")[-1]
         if fname.startswith("trial_"):
             total_users += 1
-            # Проверяем, активен ли пробный
             content = github_get_file(fpath)
             if content and content != "expired":
                 parsed = parse_user_file(content)
@@ -274,7 +246,7 @@ async def get_user_stats() -> dict:
                 parsed = parse_user_file(content)
                 if parsed and parsed["expire_date"] >= datetime.now():
                     active_paid += 1
-    
+
     revenue = get_revenue()
     return {
         "total_users": total_users,
@@ -335,23 +307,20 @@ async def cmd_start(message: Message):
 async def process_trial(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     await callback.answer()
-    
-    # Проверяем, не использовал ли пользователь пробный
+
     if await has_trial_used(user_id):
         await callback.message.answer("❌ Вы уже использовали пробный период.")
         return
-    
-    # Проверяем, нет ли активной платной подписки
+
     if await has_active_subscription(user_id):
         await callback.message.answer("✅ У вас уже есть активная платная подписка!")
         return
-    
-    # Читаем серверы для пробного периода из no_servers.txt
+
     servers = read_servers(NO_SERVERS_FILE)
     if not servers:
         await callback.message.answer("⚠️ Серверы временно недоступны, попробуйте позже.")
         return
-    
+
     expire_date = datetime.now() + timedelta(days=TRIAL_DAYS)
     success = create_user_file(
         user_id=user_id,
@@ -380,7 +349,7 @@ async def process_buy(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("buy_"))
 async def process_buy_tariff(callback: types.CallbackQuery):
-    tariff = callback.data[4:]  # убираем "buy_"
+    tariff = callback.data[4:]
     if tariff not in PRICES:
         await callback.answer("Неверный тариф")
         return
@@ -390,7 +359,7 @@ async def process_buy_tariff(callback: types.CallbackQuery):
         title=f"VPN Подписка ({tariff.replace('_', ' ')})",
         description=f"Доступ к VPN серверам на {DURATIONS[tariff]} дней",
         payload=f"vpn_{tariff}",
-        provider_token="",  # для Telegram Stars
+        provider_token="",
         currency="XTR",
         prices=[LabeledPrice(label="Подписка", amount=price)],
         start_parameter="vpn_subscription",
@@ -405,21 +374,20 @@ async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
 async def successful_payment(message: Message):
     user_id = message.from_user.id
     payment = message.successful_payment
-    payload = payment.invoice_payload  # например, "vpn_1_month"
-    tariff = payload[4:]  # убираем "vpn_"
+    payload = payment.invoice_payload
+    tariff = payload[4:]
     if tariff not in DURATIONS:
         await message.answer("❌ Ошибка определения тарифа.")
         return
-    
+
     days = DURATIONS[tariff]
     price = PRICES[tariff]
-    
-    # Читаем серверы для платной подписки
+
     servers = read_servers(SERVERS_FILE)
     if not servers:
         await message.answer("⚠️ Серверы временно недоступны, обратитесь в поддержку.")
         return
-    
+
     expire_date = datetime.now() + timedelta(days=days)
     subscription_name = tariff.replace("_", " ").capitalize()
     success = create_user_file(
@@ -430,7 +398,6 @@ async def successful_payment(message: Message):
         expire_date=expire_date,
     )
     if success:
-        # Обновляем доход
         update_revenue(price)
         await message.answer(
             f"✅ Подписка успешно оплачена и активирована!\n"
@@ -446,7 +413,7 @@ async def successful_payment(message: Message):
 async def process_my_sub(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     await callback.answer()
-    
+
     info = await get_active_subscription_info(user_id)
     if info:
         await callback.message.answer(
@@ -535,12 +502,12 @@ async def cmd_give(message: Message):
     except:
         await message.answer("Неверные аргументы")
         return
-    
+
     servers = read_servers(SERVERS_FILE)
     if not servers:
         await message.answer("Серверы не найдены")
         return
-    
+
     expire_date = datetime.now() + timedelta(days=days)
     success = create_user_file(
         user_id=target_user_id,
@@ -567,8 +534,7 @@ async def cmd_revoke(message: Message):
     except:
         await message.answer("Неверный user_id")
         return
-    
-    # Удаляем paid файл
+
     paid_path = get_user_file_path(target_user_id, "paid")
     if github_delete_file(paid_path, f"Revoked by admin for user {target_user_id}"):
         await message.answer(f"✅ Подписка пользователя {target_user_id} отозвана.")
@@ -577,16 +543,14 @@ async def cmd_revoke(message: Message):
 
 # ==================== ЗАПУСК ====================
 async def main():
-    # Инициализация репозитория (проверка наличия нужных файлов)
+    # Инициализация репозитория
     if not github_get_file(SERVERS_FILE):
-        logging.warning("servers.txt не найден, создаю пустой")
         github_put_file(SERVERS_FILE, "# Список серверов", "Init servers.txt")
     if not github_get_file(NO_SERVERS_FILE):
-        logging.warning("no_servers.txt не найден, создаю пустой")
         github_put_file(NO_SERVERS_FILE, "# Список серверов для пробного периода", "Init no_servers.txt")
     if not github_get_file(REVENUE_FILE):
         github_put_file(REVENUE_FILE, "0", "Init revenue.txt")
-    
+
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
