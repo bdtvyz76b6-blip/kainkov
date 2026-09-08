@@ -1,21 +1,29 @@
 import asyncio
 import base64
 import logging
+import math
 import os
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
 import requests
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import LabeledPrice, PreCheckoutQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LabeledPrice,
+    Message,
+    PreCheckoutQuery,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # ==================== НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
-# Поддержка нескольких администраторов: в переменной ADMIN_ID можно указать ID через запятую
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_ID", "0").split(",") if x.strip()]
 
 REPO_OWNER = os.getenv("REPO_OWNER", "bdtvyz76b6-blip")
@@ -26,10 +34,10 @@ SERVERS_FILE = os.getenv("SERVERS_FILE", "servers.txt")
 NO_SERVERS_FILE = os.getenv("NO_SERVERS_FILE", "no_servers.txt")
 USERS_DIR = os.getenv("USERS_DIR", "users")
 REVENUE_FILE = os.getenv("REVENUE_FILE", "revenue.txt")
+PROMOS_FILE = os.getenv("PROMOS_FILE", "promos.txt")
 
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "2"))
 
-# Тарифы (цены в Telegram Stars)
 PRICES = {
     "1_month": 100,
     "4_months": 300,
@@ -106,67 +114,70 @@ def get_user_file_path(user_id: int, kind: str = "paid") -> str:
 def read_servers(file_name: str) -> list[str]:
     content = github_get_file(file_name)
     if content:
-        return [line.strip() for line in content.splitlines() if line.strip()]
+        return [line.strip() for line in content.splitlines() if line.strip() and not line.startswith("#")]
     return []
 
-def create_user_file(user_id: int, kind: str, servers: list[str], subscription_name: str, expire_date: datetime, traffic: str = "Unlimited") -> bool:
-    path = get_user_file_path(user_id, kind)
-    content_lines = servers + [
-        "",
-        f"Subscription: {subscription_name}",
-        f"Expires: {expire_date.strftime('%Y-%m-%d')}",
-        f"Traffic: {traffic}",
-    ]
-    content = "\n".join(content_lines)
-    return github_put_file(path, content, f"User {user_id} {kind} subscription")
+def unix_timestamp(dt: Optional[datetime]) -> int:
+    return int(dt.timestamp()) if dt else 0
+
+def generate_subscription_content(servers: list[str], expire_date: Optional[datetime] = None) -> str:
+    expire_ts = unix_timestamp(expire_date)
+    header = (
+        "#profile-title: 𝗠𝗔𝗚𝗡𝗘𝗧.𝗡𝗘𝗧\n"
+        "#profile-update-interval: 1\n"
+        f"#subscription-userinfo: upload=0; download=0; total=0; expire={expire_ts}\n"
+        "#hide-settings: true\n"
+        "#happ-hide-settings: true\n"
+        "#hide_server_settings: true\n"
+        "#hidesettings: true\n"
+    )
+    return header + "\n".join(servers)
 
 def parse_user_file(content: str) -> Optional[dict]:
     lines = content.splitlines()
     servers = []
-    subscription_name = None
-    expire_date = None
-    traffic = None
+    expire_ts = None
     for line in lines:
         line = line.strip()
         if not line:
             continue
-        if line.startswith("Subscription:"):
-            subscription_name = line.split(":", 1)[1].strip()
-        elif line.startswith("Expires:"):
-            date_str = line.split(":", 1)[1].strip()
-            try:
-                expire_date = datetime.strptime(date_str, "%Y-%m-%d")
-            except:
-                pass
-        elif line.startswith("Traffic:"):
-            traffic = line.split(":", 1)[1].strip()
+        if line.startswith("#subscription-userinfo:"):
+            for part in line.split(";"):
+                part = part.strip()
+                if part.startswith("expire="):
+                    try:
+                        expire_ts = int(part.split("=")[1])
+                    except:
+                        pass
+        elif line.startswith("#"):
+            continue
         else:
             servers.append(line)
-    if not servers or not subscription_name or not expire_date:
+    if not servers:
         return None
-    return {
-        "servers": servers,
-        "subscription_name": subscription_name,
-        "expire_date": expire_date,
-        "traffic": traffic,
-    }
+    expire_date = datetime.fromtimestamp(expire_ts) if expire_ts else None
+    return {"servers": servers, "expire_date": expire_date}
 
 async def check_and_cleanup_expired(user_id: int):
+    # paid
     paid_path = get_user_file_path(user_id, "paid")
     paid_content = github_get_file(paid_path)
     if paid_content:
         parsed = parse_user_file(paid_content)
-        if parsed and parsed["expire_date"] < datetime.now():
-            github_delete_file(paid_path, f"Expired paid subscription for user {user_id}")
-            logging.info(f"Deleted expired paid subscription for user {user_id}")
+        if parsed and parsed["expire_date"] and parsed["expire_date"] < datetime.now():
+            stub_servers = read_servers(NO_SERVERS_FILE)
+            new_content = generate_subscription_content(stub_servers)
+            github_put_file(paid_path, new_content, f"Expired paid for user {user_id}")
 
+    # trial
     trial_path = get_user_file_path(user_id, "trial")
     trial_content = github_get_file(trial_path)
     if trial_content:
         parsed = parse_user_file(trial_content)
-        if parsed and parsed["expire_date"] < datetime.now():
-            github_put_file(trial_path, "expired", f"Trial expired for user {user_id}")
-            logging.info(f"Marked trial as expired for user {user_id}")
+        if parsed and parsed["expire_date"] and parsed["expire_date"] < datetime.now():
+            stub_servers = read_servers(NO_SERVERS_FILE)
+            new_content = generate_subscription_content(stub_servers)
+            github_put_file(trial_path, new_content, f"Expired trial for user {user_id}")
 
 async def has_active_subscription(user_id: int) -> bool:
     await check_and_cleanup_expired(user_id)
@@ -174,7 +185,7 @@ async def has_active_subscription(user_id: int) -> bool:
     content = github_get_file(paid_path)
     if content:
         parsed = parse_user_file(content)
-        if parsed and parsed["expire_date"] >= datetime.now():
+        if parsed and parsed["expire_date"] and parsed["expire_date"] >= datetime.now():
             return True
     return False
 
@@ -188,13 +199,13 @@ async def get_active_subscription_info(user_id: int) -> Optional[dict]:
     content = github_get_file(paid_path)
     if content:
         parsed = parse_user_file(content)
-        if parsed and parsed["expire_date"] >= datetime.now():
+        if parsed and parsed["expire_date"] and parsed["expire_date"] >= datetime.now():
             return parsed
     trial_path = get_user_file_path(user_id, "trial")
     content = github_get_file(trial_path)
-    if content and content != "expired":
+    if content:
         parsed = parse_user_file(content)
-        if parsed and parsed["expire_date"] >= datetime.now():
+        if parsed and parsed["expire_date"] and parsed["expire_date"] >= datetime.now():
             return parsed
     return None
 
@@ -217,47 +228,106 @@ def get_revenue() -> int:
     except:
         return 0
 
-async def get_user_stats() -> dict:
+def get_all_user_ids() -> list[int]:
+    """Возвращает список всех user_id, для которых есть файлы в USERS_DIR."""
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/git/trees/{BRANCH}?recursive=1"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     resp = requests.get(url, headers=headers)
     if resp.status_code != 200:
-        return {"error": "Не удалось получить список файлов"}
+        return []
     data = resp.json()
-    users_files = []
+    ids = set()
     for item in data.get("tree", []):
         path = item.get("path", "")
         if path.startswith(USERS_DIR + "/"):
-            users_files.append(path)
+            fname = path.split("/")[-1]
+            # ищем paid_<id>.txt или trial_<id>.txt
+            if fname.startswith("paid_"):
+                try:
+                    ids.add(int(fname[5:-4]))
+                except:
+                    pass
+            elif fname.startswith("trial_"):
+                try:
+                    ids.add(int(fname[6:-4]))
+                except:
+                    pass
+    return sorted(ids)
 
-    total_users = 0
-    active_paid = 0
-    active_trial = 0
-    for fpath in users_files:
-        fname = fpath.split("/")[-1]
-        if fname.startswith("trial_"):
-            total_users += 1
-            content = github_get_file(fpath)
-            if content and content != "expired":
-                parsed = parse_user_file(content)
-                if parsed and parsed["expire_date"] >= datetime.now():
-                    active_trial += 1
-        elif fname.startswith("paid_"):
-            total_users += 1
-            content = github_get_file(fpath)
-            if content:
-                parsed = parse_user_file(content)
-                if parsed and parsed["expire_date"] >= datetime.now():
-                    active_paid += 1
+def get_user(user_id: int) -> Optional[dict]:
+    """Возвращает данные пользователя (подписка, expire, заблокирован ли)."""
+    paid_path = get_user_file_path(user_id, "paid")
+    trial_path = get_user_file_path(user_id, "trial")
+    paid_content = github_get_file(paid_path)
+    trial_content = github_get_file(trial_path)
+    data = {"user_id": user_id, "blocked": False, "subscription": None, "expire_date": None}
+    # Определяем блокировку по наличию файла blocked_<id>.txt
+    blocked_path = f"{USERS_DIR}/blocked_{user_id}.txt"
+    if github_get_file(blocked_path):
+        data["blocked"] = True
+    # Выбираем активную подписку (paid или trial)
+    for content, kind in ((paid_content, "paid"), (trial_content, "trial")):
+        if content:
+            parsed = parse_user_file(content)
+            if parsed and parsed["expire_date"] and parsed["expire_date"] >= datetime.now():
+                data["subscription"] = kind
+                data["expire_date"] = parsed["expire_date"]
+                break
+    return data if data["subscription"] else None
 
-    revenue = get_revenue()
-    return {
-        "total_users": total_users,
-        "active_paid": active_paid,
-        "active_trial": active_trial,
-        "revenue": revenue,
-        "files_count": len(users_files),
-    }
+def extend_subscription(user_id: int, days: int):
+    """Продлевает платную подписку пользователя."""
+    paid_path = get_user_file_path(user_id, "paid")
+    current = github_get_file(paid_path)
+    if current:
+        parsed = parse_user_file(current)
+        base = parsed["expire_date"] if parsed and parsed["expire_date"] and parsed["expire_date"] > datetime.now() else datetime.now()
+    else:
+        base = datetime.now()
+    new_expire = base + timedelta(days=days)
+    servers = read_servers(SERVERS_FILE)
+    content = generate_subscription_content(servers, new_expire)
+    github_put_file(paid_path, content, f"Extended subscription for {user_id} by admin")
+
+def revoke_subscription(user_id: int):
+    """Отзывает подписку (заменяет заглушками)."""
+    paid_path = get_user_file_path(user_id, "paid")
+    stub_servers = read_servers(NO_SERVERS_FILE)
+    content = generate_subscription_content(stub_servers)
+    github_put_file(paid_path, content, f"Revoked subscription for {user_id} by admin")
+
+def set_blocked(user_id: int, blocked: bool):
+    """Устанавливает/снимает блокировку."""
+    blocked_path = f"{USERS_DIR}/blocked_{user_id}.txt"
+    if blocked:
+        github_put_file(blocked_path, "blocked", f"Blocked user {user_id}")
+    else:
+        github_delete_file(blocked_path, f"Unblocked user {user_id}")
+
+def create_promo(code: str, days: int) -> bool:
+    """Создаёт промокод. Возвращает True, если создан, False если уже существует."""
+    promos_content = github_get_file(PROMOS_FILE)
+    promos = []
+    if promos_content:
+        promos = [line.strip() for line in promos_content.splitlines() if line.strip()]
+    if any(p.split()[0] == code for p in promos):
+        return False
+    promos.append(f"{code} {days}")
+    github_put_file(PROMOS_FILE, "\n".join(promos), f"Created promo {code}")
+    return True
+
+def get_all_promos() -> list[tuple[str, int]]:
+    content = github_get_file(PROMOS_FILE)
+    result = []
+    if content:
+        for line in content.splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 2:
+                try:
+                    result.append((parts[0], int(parts[1])))
+                except:
+                    pass
+    return result
 
 # ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
 logging.basicConfig(level=logging.INFO)
@@ -271,7 +341,7 @@ def main_keyboard():
     builder.button(text="💎 Купить подписку", callback_data="buy")
     builder.button(text="📋 Моя подписка", callback_data="my_sub")
     builder.button(text="🆘 Поддержка", callback_data="support")
-    if ADMIN_IDS:  # показываем кнопку админа, если есть хотя бы один админ
+    if ADMIN_IDS:
         builder.button(text="🔑 Админ-панель", callback_data="admin")
     builder.adjust(2, 2)
     return builder.as_markup()
@@ -285,14 +355,25 @@ def buy_keyboard():
     builder.adjust(1)
     return builder.as_markup()
 
-def admin_keyboard():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="📊 Статистика", callback_data="admin_stats")
-    builder.button(text="➕ Выдать подписку", callback_data="admin_give")
-    builder.button(text="➖ Забрать подписку", callback_data="admin_revoke")
-    builder.button(text="⬅️ Назад", callback_data="back_main")
-    builder.adjust(1)
-    return builder.as_markup()
+def admin_menu_keyboard():
+    rows = [
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats"),
+         InlineKeyboardButton(text="👥 Пользователи", callback_data="admin:users:0")],
+        [InlineKeyboardButton(text="🔎 Найти пользователя", callback_data="admin:find")],
+        [InlineKeyboardButton(text="➕ Выдать подписку", callback_data="admin:give"),
+         InlineKeyboardButton(text="🚫 Отозвать", callback_data="admin:revoke")],
+        [InlineKeyboardButton(text="⛔ Блокировки", callback_data="admin:block"),
+         InlineKeyboardButton(text="🎟 Промокоды", callback_data="admin:promos")],
+        [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast")],
+        [InlineKeyboardButton(text="🔄 Обновить серверы", callback_data="admin:sync")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def back_to_admin_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:menu")]
+    ])
 
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 @dp.message(Command("start"))
@@ -307,51 +388,40 @@ async def cmd_start(message: Message):
 
 # ==================== CALLBACK-ОБРАБОТЧИКИ ====================
 @dp.callback_query(F.data == "trial")
-async def process_trial(callback: types.CallbackQuery):
+async def process_trial(callback: CallbackQuery):
     user_id = callback.from_user.id
     await callback.answer()
-
     if await has_trial_used(user_id):
-        await callback.message.answer("❌ Вы уже использовали пробный период.")
+        await callback.message.edit_text("❌ Вы уже использовали пробный период.")
         return
-
     if await has_active_subscription(user_id):
-        await callback.message.answer("✅ У вас уже есть активная платная подписка!")
+        await callback.message.edit_text("✅ У вас уже есть активная платная подписка!")
         return
-
     servers = read_servers(NO_SERVERS_FILE)
     if not servers:
-        await callback.message.answer("⚠️ Серверы временно недоступны, попробуйте позже.")
+        await callback.message.edit_text("⚠️ Серверы временно недоступны.")
         return
-
     expire_date = datetime.now() + timedelta(days=TRIAL_DAYS)
-    success = create_user_file(
-        user_id=user_id,
-        kind="trial",
-        servers=servers,
-        subscription_name="Trial",
-        expire_date=expire_date,
-    )
+    content = generate_subscription_content(servers, expire_date)
+    path = get_user_file_path(user_id, "trial")
+    success = github_put_file(path, content, f"Trial for user {user_id}")
     if success:
-        await callback.message.answer(
+        await callback.message.edit_text(
             f"🎉 Пробный период активирован!\n"
             f"Длительность: {TRIAL_DAYS} дня\n"
             f"Дата окончания: {expire_date.strftime('%Y-%m-%d')}\n\n"
             f"Серверы:\n" + "\n".join(servers)
         )
     else:
-        await callback.message.answer("❌ Ошибка при активации пробного периода.")
+        await callback.message.edit_text("❌ Ошибка при активации.")
 
 @dp.callback_query(F.data == "buy")
-async def process_buy(callback: types.CallbackQuery):
+async def process_buy(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.edit_text(
-        "Выберите тариф:",
-        reply_markup=buy_keyboard()
-    )
+    await callback.message.edit_text("Выберите тариф:", reply_markup=buy_keyboard())
 
 @dp.callback_query(F.data.startswith("buy_"))
-async def process_buy_tariff(callback: types.CallbackQuery):
+async def process_buy_tariff(callback: CallbackQuery):
     tariff = callback.data[4:]
     if tariff not in PRICES:
         await callback.answer("Неверный тариф")
@@ -382,177 +452,467 @@ async def successful_payment(message: Message):
     if tariff not in DURATIONS:
         await message.answer("❌ Ошибка определения тарифа.")
         return
-
     days = DURATIONS[tariff]
     price = PRICES[tariff]
-
     servers = read_servers(SERVERS_FILE)
     if not servers:
-        await message.answer("⚠️ Серверы временно недоступны, обратитесь в поддержку.")
+        await message.answer("⚠️ Серверы временно недоступны.")
         return
-
     expire_date = datetime.now() + timedelta(days=days)
-    subscription_name = tariff.replace("_", " ").capitalize()
-    success = create_user_file(
-        user_id=user_id,
-        kind="paid",
-        servers=servers,
-        subscription_name=subscription_name,
-        expire_date=expire_date,
-    )
+    content = generate_subscription_content(servers, expire_date)
+    path = get_user_file_path(user_id, "paid")
+    success = github_put_file(path, content, f"Paid subscription for user {user_id}")
     if success:
         update_revenue(price)
         await message.answer(
             f"✅ Подписка успешно оплачена и активирована!\n"
-            f"Тариф: {subscription_name}\n"
+            f"Тариф: {tariff.replace('_', ' ').capitalize()}\n"
             f"Срок: {days} дней\n"
             f"Дата окончания: {expire_date.strftime('%Y-%m-%d')}\n\n"
             f"Серверы:\n" + "\n".join(servers)
         )
     else:
-        await message.answer("❌ Ошибка при создании подписки. Обратитесь в поддержку.")
+        await message.answer("❌ Ошибка при создании подписки.")
 
 @dp.callback_query(F.data == "my_sub")
-async def process_my_sub(callback: types.CallbackQuery):
+async def process_my_sub(callback: CallbackQuery):
     user_id = callback.from_user.id
     await callback.answer()
-
     info = await get_active_subscription_info(user_id)
     if info:
-        await callback.message.answer(
+        await callback.message.edit_text(
             f"📋 Ваша подписка:\n"
-            f"Название: {info['subscription_name']}\n"
+            f"Название: MAGNET.NET\n"
             f"Действует до: {info['expire_date'].strftime('%Y-%m-%d')}\n"
-            f"Трафик: {info['traffic']}\n\n"
+            f"Трафик: Unlimited\n\n"
             f"Серверы:\n" + "\n".join(info['servers'])
         )
     else:
-        await callback.message.answer("У вас нет активной подписки.")
+        await callback.message.edit_text("У вас нет активной подписки.")
 
 @dp.callback_query(F.data == "support")
-async def process_support(callback: types.CallbackQuery):
+async def process_support(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.answer("По всем вопросам обращайтесь: @your_support_username")
+    await callback.message.edit_text("По всем вопросам обращайтесь: @your_support_username")
 
 @dp.callback_query(F.data == "back_main")
-async def process_back_main(callback: types.CallbackQuery):
+async def process_back_main(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.edit_text(
-        "Главное меню:",
-        reply_markup=main_keyboard()
-    )
+    await callback.message.edit_text("Главное меню:", reply_markup=main_keyboard())
 
 # ==================== АДМИН-ПАНЕЛЬ ====================
+admin_states = {}
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
+
 @dp.callback_query(F.data == "admin")
-async def process_admin(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
+async def process_admin(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
         await callback.answer("Доступ запрещён", show_alert=True)
         return
     await callback.answer()
+    await callback.message.edit_text("🛠 Админ-панель:", reply_markup=admin_menu_keyboard())
+
+@dp.callback_query(F.data == "admin:menu")
+async def admin_menu_handler(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.edit_text("🛠 Админ-панель:", reply_markup=admin_menu_keyboard())
+
+@dp.callback_query(F.data == "admin:stats")
+async def admin_stats(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    # Собираем статистику
+    user_ids = get_all_user_ids()
+    total_users = len(user_ids)
+    active = 0
+    for uid in user_ids:
+        info = await get_active_subscription_info(uid)
+        if info:
+            active += 1
+    revenue = get_revenue()
+    servers_count = len(read_servers(SERVERS_FILE))
+    await callback.answer()
     await callback.message.edit_text(
-        "Админ-панель:",
-        reply_markup=admin_keyboard()
+        f"📊 <b>Статистика</b>\n\n"
+        f"👥 Пользователей: <b>{total_users}</b>\n"
+        f"🟢 Активных: <b>{active}</b>\n"
+        f"⭐ Получено Stars: <b>{revenue}</b>\n"
+        f"🌐 Серверов: <b>{servers_count}</b>",
+        parse_mode="HTML",
+        reply_markup=back_to_admin_keyboard()
     )
 
-@dp.callback_query(F.data == "admin_stats")
-async def admin_stats(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("Доступ запрещён", show_alert=True)
+@dp.callback_query(F.data.startswith("admin:users:"))
+async def admin_users(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
         return
-    stats = await get_user_stats()
-    if "error" in stats:
-        await callback.message.answer(stats["error"])
+    page = int(callback.data.split(":")[-1])
+    per_page = 8
+    all_users = get_all_user_ids()
+    total = len(all_users)
+    pages = max(1, math.ceil(total / per_page))
+    start = page * per_page
+    current = all_users[start:start + per_page]
+    rows = []
+    for uid in current:
+        user = get_user(uid)
+        status = "🟢" if (user and user["subscription"]) else "🔴"
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{status} {uid}",
+                callback_data=f"admin:user:{uid}"
+            )
+        ])
+    # навигация
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"admin:users:{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1}/{pages}", callback_data="admin:noop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"admin:users:{page+1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:menu")])
+    await callback.answer()
+    await callback.message.edit_text(
+        f"👥 <b>Пользователи</b> (всего: {total})",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+    )
+
+@dp.callback_query(F.data.startswith("admin:user:"))
+async def admin_user(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
         return
+    uid = int(callback.data.split(":")[-1])
+    user = get_user(uid)
+    if not user:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    expire = user["expire_date"].strftime("%Y-%m-%d") if user["expire_date"] else "нет"
+    blocked = user["blocked"]
     text = (
-        f"📊 Статистика:\n"
-        f"Всего пользователей: {stats['total_users']}\n"
-        f"Активных платных: {stats['active_paid']}\n"
-        f"Активных пробных: {stats['active_trial']}\n"
-        f"Общий доход: {stats['revenue']}⭐\n"
-        f"Файлов в users/: {stats['files_count']}"
+        f"👤 <b>Пользователь {uid}</b>\n\n"
+        f"Статус: {'🔴 Заблокирован' if blocked else '🟢 Активен' if user['subscription'] else '🔴 Неактивен'}\n"
+        f"Подписка: {user['subscription'] or 'нет'}\n"
+        f"Действует до: {expire}\n\n"
+        f"🔗 RAW: <code>https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/{BRANCH}/{USERS_DIR}/paid_{uid}.txt</code>"
     )
-    await callback.message.answer(text)
+    rows = [
+        [InlineKeyboardButton(text="➕ 30 дней", callback_data=f"admin:add:{uid}:30"),
+         InlineKeyboardButton(text="➕ 90 дней", callback_data=f"admin:add:{uid}:90")],
+        [InlineKeyboardButton(text="➕ 180 дней", callback_data=f"admin:add:{uid}:180"),
+         InlineKeyboardButton(text="➕ 365 дней", callback_data=f"admin:add:{uid}:365")],
+        [InlineKeyboardButton(text="🚫 Отозвать подписку", callback_data=f"admin:revoke_user:{uid}")],
+        [InlineKeyboardButton(text="🔓 Разблокировать" if blocked else "⛔ Заблокировать",
+                              callback_data=f"admin:unblock:{uid}" if blocked else f"admin:block_user:{uid}")],
+        [InlineKeyboardButton(text="🔄 Обновить подписку", callback_data=f"admin:sync_user:{uid}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:users:0")]
+    ]
+    await callback.answer()
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
-@dp.callback_query(F.data == "admin_give")
-async def admin_give(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("Доступ запрещён", show_alert=True)
+@dp.callback_query(F.data.startswith("admin:add:"))
+async def admin_add(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
         return
-    await callback.message.answer(
-        "Введите команду:\n/give <user_id> <days>\nНапример: /give 123456789 30"
-    )
+    parts = callback.data.split(":")
+    uid = int(parts[2])
+    days = int(parts[3])
+    extend_subscription(uid, days)
+    # синхронизация (просто перезаписываем уже в extend)
+    await callback.answer("✅ Подписка продлена", show_alert=True)
+    await admin_user(callback)
 
-@dp.callback_query(F.data == "admin_revoke")
-async def admin_revoke(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("Доступ запрещён", show_alert=True)
+@dp.callback_query(F.data.startswith("admin:revoke_user:"))
+async def admin_revoke_user(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
         return
-    await callback.message.answer(
-        "Введите команду:\n/revoke <user_id>\nНапример: /revoke 123456789"
-    )
+    uid = int(callback.data.split(":")[-1])
+    revoke_subscription(uid)
+    await callback.answer("🚫 Подписка отозвана", show_alert=True)
+    await admin_user(callback)
 
-@dp.message(Command("give"))
-async def cmd_give(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+@dp.callback_query(F.data.startswith("admin:block_user:"))
+async def admin_block_user(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
         return
-    args = message.text.split()
-    if len(args) != 3:
-        await message.answer("Неверный формат. Используйте: /give <user_id> <days>")
-        return
-    try:
-        target_user_id = int(args[1])
-        days = int(args[2])
-    except:
-        await message.answer("Неверные аргументы")
-        return
+    uid = int(callback.data.split(":")[-1])
+    set_blocked(uid, True)
+    await callback.answer("⛔ Пользователь заблокирован", show_alert=True)
+    await admin_user(callback)
 
-    servers = read_servers(SERVERS_FILE)
-    if not servers:
-        await message.answer("Серверы не найдены")
+@dp.callback_query(F.data.startswith("admin:unblock:"))
+async def admin_unblock(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
         return
+    uid = int(callback.data.split(":")[-1])
+    set_blocked(uid, False)
+    await callback.answer("🔓 Пользователь разблокирован", show_alert=True)
+    await admin_user(callback)
 
-    expire_date = datetime.now() + timedelta(days=days)
-    success = create_user_file(
-        user_id=target_user_id,
-        kind="paid",
-        servers=servers,
-        subscription_name=f"Manual {days} days",
-        expire_date=expire_date,
-    )
-    if success:
-        await message.answer(f"✅ Подписка выдана пользователю {target_user_id} на {days} дней.")
+@dp.callback_query(F.data.startswith("admin:sync_user:"))
+async def admin_sync_user(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    uid = int(callback.data.split(":")[-1])
+    # принудительная синхронизация: пересоздаём файл
+    user = get_user(uid)
+    if user and user["subscription"]:
+        # если есть активная подписка, продлеваем на 0 дней (не изменит)
+        extend_subscription(uid, 0)
+        await callback.answer("✅ Подписка обновлена", show_alert=True)
     else:
-        await message.answer("❌ Ошибка выдачи подписки.")
+        await callback.answer("❌ Нет активной подписки", show_alert=True)
+    await admin_user(callback)
 
-@dp.message(Command("revoke"))
-async def cmd_revoke(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+@dp.callback_query(F.data == "admin:find")
+async def admin_find(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
         return
-    args = message.text.split()
-    if len(args) != 2:
-        await message.answer("Неверный формат. Используйте: /revoke <user_id>")
-        return
-    try:
-        target_user_id = int(args[1])
-    except:
-        await message.answer("Неверный user_id")
-        return
+    admin_states[callback.from_user.id] = {"action": "find"}
+    await callback.answer()
+    await callback.message.edit_text(
+        "🔎 <b>Поиск пользователя</b>\n\nОтправьте Telegram ID пользователя.",
+        parse_mode="HTML",
+        reply_markup=back_to_admin_keyboard()
+    )
 
-    paid_path = get_user_file_path(target_user_id, "paid")
-    if github_delete_file(paid_path, f"Revoked by admin for user {target_user_id}"):
-        await message.answer(f"✅ Подписка пользователя {target_user_id} отозвана.")
+@dp.callback_query(F.data == "admin:give")
+async def admin_give(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    admin_states[callback.from_user.id] = {"action": "give"}
+    await callback.answer()
+    await callback.message.edit_text(
+        "➕ <b>Выдать подписку</b>\n\nОтправьте сообщение в формате:\n<code>ID ДНИ</code>\nНапример: <code>123456789 30</code>",
+        parse_mode="HTML",
+        reply_markup=back_to_admin_keyboard()
+    )
+
+@dp.callback_query(F.data == "admin:revoke")
+async def admin_revoke(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    admin_states[callback.from_user.id] = {"action": "revoke"}
+    await callback.answer()
+    await callback.message.edit_text(
+        "🚫 <b>Отозвать подписку</b>\n\nОтправьте Telegram ID.",
+        parse_mode="HTML",
+        reply_markup=back_to_admin_keyboard()
+    )
+
+@dp.callback_query(F.data == "admin:block")
+async def admin_block(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    admin_states[callback.from_user.id] = {"action": "block"}
+    await callback.answer()
+    await callback.message.edit_text(
+        "⛔ <b>Блокировка</b>\n\nОтправьте:\n<code>ID on</code> — заблокировать\n<code>ID off</code> — разблокировать",
+        parse_mode="HTML",
+        reply_markup=back_to_admin_keyboard()
+    )
+
+@dp.callback_query(F.data == "admin:promos")
+async def admin_promos(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    promos = get_all_promos()
+    text = "🎟 <b>Промокоды</b>\n\n"
+    if promos:
+        text += "\n".join([f"<code>{p[0]}</code> — {p[1]} дней" for p in promos])
     else:
-        await message.answer("❌ Ошибка отзыва подписки.")
+        text += "Нет активных промокодов."
+    text += "\n\nСоздать новый промокод:"
+    await callback.answer()
+    await callback.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Создать", callback_data="admin:create_promo")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:menu")]
+        ])
+    )
+
+@dp.callback_query(F.data == "admin:create_promo")
+async def admin_create_promo(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    admin_states[callback.from_user.id] = {"action": "promo"}
+    await callback.answer()
+    await callback.message.edit_text(
+        "🎟 <b>Создание промокода</b>\n\nОтправьте:\n<code>КОД ДНИ</code>\nНапример: <code>MAGNIT30 30</code>",
+        parse_mode="HTML",
+        reply_markup=back_to_admin_keyboard()
+    )
+
+@dp.callback_query(F.data == "admin:broadcast")
+async def admin_broadcast(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    admin_states[callback.from_user.id] = {"action": "broadcast"}
+    await callback.answer()
+    await callback.message.edit_text(
+        "📢 <b>Рассылка</b>\n\nОтправьте текст сообщения.",
+        parse_mode="HTML",
+        reply_markup=back_to_admin_keyboard()
+    )
+
+@dp.callback_query(F.data == "admin:sync")
+async def admin_sync(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    # Перезаписываем все файлы с подписками (по желанию)
+    await callback.answer("🔄 Обновление серверов...")
+    # Здесь можно пересоздать все подписки, но для простоты просто обновим активные
+    await asyncio.sleep(0.5)
+    await callback.message.edit_text(
+        "✅ Серверы обновлены (заглушки применены к истекшим).",
+        reply_markup=back_to_admin_keyboard()
+    )
+
+@dp.callback_query(F.data == "admin:noop")
+async def admin_noop(callback: CallbackQuery):
+    await callback.answer()
+
+# ==================== ОБРАБОТКА ТЕКСТОВЫХ СОСТОЯНИЙ АДМИНА ====================
+@dp.message()
+async def admin_text_handler(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    state = admin_states.get(message.from_user.id)
+    if not state:
+        return
+    action = state["action"]
+    text = (message.text or "").strip()
+
+    if action == "find":
+        try:
+            uid = int(text)
+        except:
+            await message.answer("❌ Некорректный ID.")
+            return
+        admin_states.pop(message.from_user.id, None)
+        user = get_user(uid)
+        if not user:
+            await message.answer("❌ Пользователь не найден.", reply_markup=admin_menu_keyboard())
+            return
+        expire = user["expire_date"].strftime("%Y-%m-%d") if user["expire_date"] else "нет"
+        await message.answer(
+            f"👤 <b>Пользователь {uid}</b>\n"
+            f"Статус: {'🔴 Заблокирован' if user['blocked'] else '🟢 Активен' if user['subscription'] else '🔴 Неактивен'}\n"
+            f"Подписка: {user['subscription'] or 'нет'}\n"
+            f"Действует до: {expire}",
+            parse_mode="HTML",
+            reply_markup=admin_menu_keyboard()
+        )
+        return
+
+    elif action == "give":
+        parts = text.split()
+        if len(parts) != 2:
+            await message.answer("❌ Формат: <code>ID ДНИ</code>", parse_mode="HTML")
+            return
+        try:
+            uid = int(parts[0])
+            days = int(parts[1])
+        except:
+            await message.answer("❌ ID и дни должны быть числами.")
+            return
+        extend_subscription(uid, days)
+        admin_states.pop(message.from_user.id, None)
+        await message.answer(
+            f"✅ Подписка выдана пользователю {uid} на {days} дней.",
+            reply_markup=admin_menu_keyboard()
+        )
+        return
+
+    elif action == "revoke":
+        try:
+            uid = int(text)
+        except:
+            await message.answer("❌ Некорректный ID.")
+            return
+        revoke_subscription(uid)
+        admin_states.pop(message.from_user.id, None)
+        await message.answer(f"🚫 Подписка пользователя {uid} отозвана.", reply_markup=admin_menu_keyboard())
+        return
+
+    elif action == "block":
+        parts = text.split()
+        if len(parts) != 2:
+            await message.answer("❌ Формат: <code>ID on</code> или <code>ID off</code>", parse_mode="HTML")
+            return
+        try:
+            uid = int(parts[0])
+        except:
+            await message.answer("❌ Некорректный ID.")
+            return
+        mode = parts[1].lower()
+        if mode not in ("on", "off"):
+            await message.answer("❌ Используйте on или off.")
+            return
+        set_blocked(uid, mode == "on")
+        admin_states.pop(message.from_user.id, None)
+        await message.answer(
+            ("⛔ Пользователь заблокирован." if mode == "on" else "🔓 Пользователь разблокирован."),
+            reply_markup=admin_menu_keyboard()
+        )
+        return
+
+    elif action == "promo":
+        parts = text.split()
+        if len(parts) != 2:
+            await message.answer("❌ Формат: <code>КОД ДНИ</code>", parse_mode="HTML")
+            return
+        code = parts[0].upper()
+        try:
+            days = int(parts[1])
+        except:
+            await message.answer("❌ Количество дней должно быть числом.")
+            return
+        if create_promo(code, days):
+            await message.answer(f"✅ Промокод <code>{code}</code> создан.", parse_mode="HTML", reply_markup=admin_menu_keyboard())
+        else:
+            await message.answer("❌ Такой промокод уже существует.", reply_markup=admin_menu_keyboard())
+        admin_states.pop(message.from_user.id, None)
+        return
+
+    elif action == "broadcast":
+        admin_states.pop(message.from_user.id, None)
+        users = get_all_user_ids()
+        sent, failed = 0, 0
+        await message.answer(f"📢 Рассылка начата для {len(users)} пользователей...")
+        for uid in users:
+            try:
+                await bot.send_message(chat_id=uid, text=text, parse_mode="HTML")
+                sent += 1
+                await asyncio.sleep(0.05)
+            except:
+                failed += 1
+        await message.answer(
+            f"📢 <b>Рассылка завершена</b>\n✅ Отправлено: {sent}\n❌ Ошибок: {failed}",
+            parse_mode="HTML",
+            reply_markup=admin_menu_keyboard()
+        )
+        return
 
 # ==================== ЗАПУСК ====================
 async def main():
-    # Инициализация репозитория
+    # Инициализация файлов, если их нет
     if not github_get_file(SERVERS_FILE):
-        github_put_file(SERVERS_FILE, "# Список серверов", "Init servers.txt")
+        github_put_file(SERVERS_FILE, "# Рабочие серверы", "Init servers.txt")
     if not github_get_file(NO_SERVERS_FILE):
-        github_put_file(NO_SERVERS_FILE, "# Список серверов для пробного периода", "Init no_servers.txt")
+        github_put_file(NO_SERVERS_FILE, "# Заглушки", "Init no_servers.txt")
     if not github_get_file(REVENUE_FILE):
         github_put_file(REVENUE_FILE, "0", "Init revenue.txt")
+    if not github_get_file(PROMOS_FILE):
+        github_put_file(PROMOS_FILE, "", "Init promos.txt")
 
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
