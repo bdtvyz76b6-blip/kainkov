@@ -195,17 +195,21 @@ async def has_trial_used(user_id: int) -> bool:
 
 async def get_active_subscription_info(user_id: int) -> Optional[dict]:
     await check_and_cleanup_expired(user_id)
+    # Сначала paid
     paid_path = get_user_file_path(user_id, "paid")
     content = github_get_file(paid_path)
     if content:
         parsed = parse_user_file(content)
         if parsed and parsed["expire_date"] and parsed["expire_date"] >= datetime.now():
+            parsed["kind"] = "paid"
             return parsed
+    # Затем trial
     trial_path = get_user_file_path(user_id, "trial")
     content = github_get_file(trial_path)
     if content:
         parsed = parse_user_file(content)
         if parsed and parsed["expire_date"] and parsed["expire_date"] >= datetime.now():
+            parsed["kind"] = "trial"
             return parsed
     return None
 
@@ -229,7 +233,6 @@ def get_revenue() -> int:
         return 0
 
 def get_all_user_ids() -> list[int]:
-    """Возвращает список всех user_id, для которых есть файлы в USERS_DIR."""
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/git/trees/{BRANCH}?recursive=1"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
     resp = requests.get(url, headers=headers)
@@ -241,7 +244,6 @@ def get_all_user_ids() -> list[int]:
         path = item.get("path", "")
         if path.startswith(USERS_DIR + "/"):
             fname = path.split("/")[-1]
-            # ищем paid_<id>.txt или trial_<id>.txt
             if fname.startswith("paid_"):
                 try:
                     ids.add(int(fname[5:-4]))
@@ -255,17 +257,14 @@ def get_all_user_ids() -> list[int]:
     return sorted(ids)
 
 def get_user(user_id: int) -> Optional[dict]:
-    """Возвращает данные пользователя (подписка, expire, заблокирован ли)."""
     paid_path = get_user_file_path(user_id, "paid")
     trial_path = get_user_file_path(user_id, "trial")
     paid_content = github_get_file(paid_path)
     trial_content = github_get_file(trial_path)
     data = {"user_id": user_id, "blocked": False, "subscription": None, "expire_date": None}
-    # Определяем блокировку по наличию файла blocked_<id>.txt
     blocked_path = f"{USERS_DIR}/blocked_{user_id}.txt"
     if github_get_file(blocked_path):
         data["blocked"] = True
-    # Выбираем активную подписку (paid или trial)
     for content, kind in ((paid_content, "paid"), (trial_content, "trial")):
         if content:
             parsed = parse_user_file(content)
@@ -276,7 +275,6 @@ def get_user(user_id: int) -> Optional[dict]:
     return data if data["subscription"] else None
 
 def extend_subscription(user_id: int, days: int):
-    """Продлевает платную подписку пользователя."""
     paid_path = get_user_file_path(user_id, "paid")
     current = github_get_file(paid_path)
     if current:
@@ -290,14 +288,12 @@ def extend_subscription(user_id: int, days: int):
     github_put_file(paid_path, content, f"Extended subscription for {user_id} by admin")
 
 def revoke_subscription(user_id: int):
-    """Отзывает подписку (заменяет заглушками)."""
     paid_path = get_user_file_path(user_id, "paid")
     stub_servers = read_servers(NO_SERVERS_FILE)
     content = generate_subscription_content(stub_servers)
     github_put_file(paid_path, content, f"Revoked subscription for {user_id} by admin")
 
 def set_blocked(user_id: int, blocked: bool):
-    """Устанавливает/снимает блокировку."""
     blocked_path = f"{USERS_DIR}/blocked_{user_id}.txt"
     if blocked:
         github_put_file(blocked_path, "blocked", f"Blocked user {user_id}")
@@ -305,7 +301,6 @@ def set_blocked(user_id: int, blocked: bool):
         github_delete_file(blocked_path, f"Unblocked user {user_id}")
 
 def create_promo(code: str, days: int) -> bool:
-    """Создаёт промокод. Возвращает True, если создан, False если уже существует."""
     promos_content = github_get_file(PROMOS_FILE)
     promos = []
     if promos_content:
@@ -480,13 +475,22 @@ async def process_my_sub(callback: CallbackQuery):
     await callback.answer()
     info = await get_active_subscription_info(user_id)
     if info:
-        await callback.message.edit_text(
-            f"📋 Ваша подписка:\n"
-            f"Название: MAGNET.NET\n"
-            f"Действует до: {info['expire_date'].strftime('%Y-%m-%d')}\n"
-            f"Трафик: Unlimited\n\n"
-            f"Серверы:\n" + "\n".join(info['servers'])
+        kind = info["kind"]
+        expire = info["expire_date"].strftime("%Y-%m-%d")
+        raw_url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/{BRANCH}/{USERS_DIR}/{kind}_{user_id}.txt"
+        text = (
+            f"📋 <b>Ваша подписка</b>\n\n"
+            f"🌐 Название: <b>MAGNET.NET</b>\n"
+            f"📅 Действует до: <b>{expire}</b>\n"
+            f"🔗 Ссылка на подписку:\n"
+            f"<code>{raw_url}</code>\n\n"
+            f"Серверы:\n" + "\n".join(info["servers"])
         )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔗 Открыть подписку", url=raw_url)],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")]
+        ])
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     else:
         await callback.message.edit_text("У вас нет активной подписки.")
 
@@ -526,7 +530,6 @@ async def admin_menu_handler(callback: CallbackQuery):
 async def admin_stats(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         return
-    # Собираем статистику
     user_ids = get_all_user_ids()
     total_users = len(user_ids)
     active = 0
@@ -568,7 +571,6 @@ async def admin_users(callback: CallbackQuery):
                 callback_data=f"admin:user:{uid}"
             )
         ])
-    # навигация
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"admin:users:{page-1}"))
@@ -624,7 +626,6 @@ async def admin_add(callback: CallbackQuery):
     uid = int(parts[2])
     days = int(parts[3])
     extend_subscription(uid, days)
-    # синхронизация (просто перезаписываем уже в extend)
     await callback.answer("✅ Подписка продлена", show_alert=True)
     await admin_user(callback)
 
@@ -660,10 +661,8 @@ async def admin_sync_user(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         return
     uid = int(callback.data.split(":")[-1])
-    # принудительная синхронизация: пересоздаём файл
     user = get_user(uid)
     if user and user["subscription"]:
-        # если есть активная подписка, продлеваем на 0 дней (не изменит)
         extend_subscription(uid, 0)
         await callback.answer("✅ Подписка обновлена", show_alert=True)
     else:
@@ -767,9 +766,7 @@ async def admin_broadcast(callback: CallbackQuery):
 async def admin_sync(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         return
-    # Перезаписываем все файлы с подписками (по желанию)
     await callback.answer("🔄 Обновление серверов...")
-    # Здесь можно пересоздать все подписки, но для простоты просто обновим активные
     await asyncio.sleep(0.5)
     await callback.message.edit_text(
         "✅ Серверы обновлены (заглушки применены к истекшим).",
