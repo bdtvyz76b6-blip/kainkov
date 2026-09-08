@@ -14,7 +14,10 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 # ==================== НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+
+# Поддержка нескольких администраторов: в переменной ADMIN_ID можно указать ID через запятую
+ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_ID", "0").split(",") if x.strip()]
+
 REPO_OWNER = os.getenv("REPO_OWNER", "bdtvyz76b6-blip")
 REPO_NAME = os.getenv("REPO_NAME", "kainkov")
 BRANCH = os.getenv("BRANCH", "main")
@@ -268,7 +271,7 @@ def main_keyboard():
     builder.button(text="💎 Купить подписку", callback_data="buy")
     builder.button(text="📋 Моя подписка", callback_data="my_sub")
     builder.button(text="🆘 Поддержка", callback_data="support")
-    if ADMIN_ID:
+    if ADMIN_IDS:  # показываем кнопку админа, если есть хотя бы один админ
         builder.button(text="🔑 Админ-панель", callback_data="admin")
     builder.adjust(2, 2)
     return builder.as_markup()
@@ -442,7 +445,7 @@ async def process_back_main(callback: types.CallbackQuery):
 # ==================== АДМИН-ПАНЕЛЬ ====================
 @dp.callback_query(F.data == "admin")
 async def process_admin(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Доступ запрещён", show_alert=True)
         return
     await callback.answer()
@@ -453,7 +456,7 @@ async def process_admin(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Доступ запрещён", show_alert=True)
         return
     stats = await get_user_stats()
@@ -472,7 +475,7 @@ async def admin_stats(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "admin_give")
 async def admin_give(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Доступ запрещён", show_alert=True)
         return
     await callback.message.answer(
@@ -481,7 +484,7 @@ async def admin_give(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "admin_revoke")
 async def admin_revoke(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Доступ запрещён", show_alert=True)
         return
     await callback.message.answer(
@@ -490,7 +493,7 @@ async def admin_revoke(callback: types.CallbackQuery):
 
 @dp.message(Command("give"))
 async def cmd_give(message: Message):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_IDS:
         return
     args = message.text.split()
     if len(args) != 3:
@@ -523,7 +526,7 @@ async def cmd_give(message: Message):
 
 @dp.message(Command("revoke"))
 async def cmd_revoke(message: Message):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_IDS:
         return
     args = message.text.split()
     if len(args) != 2:
