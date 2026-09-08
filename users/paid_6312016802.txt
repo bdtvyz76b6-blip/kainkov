@@ -1,6 +1,6 @@
 #profile-title: 𝗠𝗔𝗚𝗡𝗘𝗧.𝗡𝗘𝗧
 #profile-update-interval: 1
-#subscription-userinfo: upload=0; download=0; total=0; expire=1796678835
+#subscription-userinfo: upload=0; download=0; total=0; expire=1828214835
 #hide-settings: true
 #happ-hide-settings: true
 #hide_server_settings: true
