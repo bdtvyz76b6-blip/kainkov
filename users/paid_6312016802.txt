@@ -1,0 +1,5 @@
+# Список серверов
+
+Subscription: Manual 30 days
+Expires: 2026-10-08
+Traffic: Unlimited
