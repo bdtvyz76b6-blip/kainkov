@@ -1,3 +1,11 @@
+#profile-title: MAGNET - 6312016802
+#profile-update-interval: 1
+#subscription-userinfo: upload=0; download=0; total=0; expire=1820523327
+#hide-settings: true
+#happ-hide-settings: true
+#hide_server_settings: true
+#hidesettings: true
+#announce: Подписка активна • 🧲 всё работает!
 # MAGNET.NET
 # ID: 6312016802
 # EXPIRE: 2027-09-09T20:55:27.204377+00:00
