@@ -62,16 +62,10 @@ SERVICE_NAME = os.getenv(
 TRIAL_DAYS = int(
     os.getenv("TRIAL_DAYS", "2")
 )
-# Telegram Stars
 PRICES = {
     30: 100,
     120: 300,
     240: 650,
-}
-DURATIONS = {
-    100: 30,
-    300: 120,
-    650: 240,
 }
 UTC = timezone.utc
 logging.basicConfig(
@@ -82,7 +76,6 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # HAPP CRYPT4
 # ============================================================
-# RSA-4096 public key used by the legacy Happ crypt4 format.
 HAPP_CRYPT4_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
 MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAlBetA0wjbaj+h7oJ/d/h
 pNrXvAcuhOdFGEFcfCxSWyLzWk4SAQ05gtaEGZyetTax2uqagi9HT6lapUSUe2S8
@@ -110,39 +103,42 @@ def github_headers():
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-def github_request(
-    method: str,
-    path: str,
-    **kwargs,
-):
+def github_request(method: str, path: str, **kwargs):
     url = f"{GITHUB_API}/{path.lstrip('/')}"
-    kwargs.setdefault("headers", github_headers())
-    kwargs.setdefault("timeout", 20)
-    response = requests.request(
+    kwargs.setdefault(
+        "headers",
+        github_headers(),
+    )
+    kwargs.setdefault(
+        "timeout",
+        20,
+    )
+    return requests.request(
         method,
         url,
         **kwargs,
     )
-    return response
 def github_get_file(path: str):
     response = github_request(
         "GET",
         path,
-        params={"ref": REPO_BRANCH},
+        params={
+            "ref": REPO_BRANCH
+        },
     )
     if response.status_code == 404:
         return None
     response.raise_for_status()
     data = response.json()
-    content = data.get("content", "")
+    content = data.get(
+        "content",
+        "",
+    )
     sha = data.get("sha")
     if content:
-        content = (
-            base64.b64decode(
-                content.replace("\n", "")
-            )
-            .decode("utf-8")
-        )
+        content = base64.b64decode(
+            content.replace("\n", "")
+        ).decode("utf-8")
     return {
         "content": content,
         "sha": sha,
@@ -170,24 +166,6 @@ def github_put_file(
     )
     response.raise_for_status()
     return response.json()
-def github_delete_file(
-    path: str,
-    message: str,
-):
-    current = github_get_file(path)
-    if not current:
-        return False
-    response = github_request(
-        "DELETE",
-        path,
-        json={
-            "message": message,
-            "sha": current["sha"],
-            "branch": REPO_BRANCH,
-        },
-    )
-    response.raise_for_status()
-    return True
 # ============================================================
 # FILES
 # ============================================================
@@ -197,15 +175,15 @@ def user_file(
 ):
     return f"users/{kind}_{user_id}.txt"
 def read_servers():
-    active = github_get_file("servers.txt")
-    if not active:
+    data = github_get_file("servers.txt")
+    if not data:
         return ""
-    return active["content"].strip()
+    return data["content"].strip()
 def read_no_servers():
-    inactive = github_get_file("no_servers.txt")
-    if not inactive:
+    data = github_get_file("no_servers.txt")
+    if not data:
         return ""
-    return inactive["content"].strip()
+    return data["content"].strip()
 def generate_subscription_content(
     user_id: int,
     expires: datetime,
@@ -219,9 +197,9 @@ def generate_subscription_content(
                 "?security=none#MAGNET.NET"
             )
         return (
-            "# MAGNET.NET\n"
+            f"# {SERVICE_NAME}\n"
             "# SUBSCRIPTION EXPIRED\n"
-            "# SUPPORT: @magnitsub\n"
+            f"# SUPPORT: {SUPPORT_USERNAME}\n"
             f"{servers}\n"
         )
     servers = read_servers()
@@ -244,10 +222,16 @@ def parse_user_file(content: str):
     for line in content.splitlines():
         line = line.strip()
         if line.startswith("# EXPIRE:"):
-            value = line.split(":", 1)[1].strip()
+            value = line.split(
+                ":",
+                1,
+            )[1].strip()
             try:
                 expire = datetime.fromisoformat(
-                    value.replace("Z", "+00:00")
+                    value.replace(
+                        "Z",
+                        "+00:00",
+                    )
                 )
                 if expire.tzinfo is None:
                     expire = expire.replace(
@@ -280,7 +264,9 @@ def days_left(dt):
         return 0
     return max(
         1,
-        math.ceil(seconds / 86400),
+        math.ceil(
+            seconds / 86400
+        ),
     )
 # ============================================================
 # SUBSCRIPTIONS
@@ -289,7 +275,10 @@ def get_subscription(
     user_id: int,
     kind: str = "paid",
 ):
-    path = user_file(user_id, kind)
+    path = user_file(
+        user_id,
+        kind,
+    )
     data = github_get_file(path)
     if not data:
         return None
@@ -304,9 +293,7 @@ def get_subscription(
         "sha": data["sha"],
         "expire": parsed["expire"],
     }
-def expire_user_if_needed(
-    user_id: int,
-):
+def expire_user_if_needed(user_id: int):
     subscription = get_subscription(
         user_id,
         "paid",
@@ -335,9 +322,7 @@ def expire_user_if_needed(
         "sha": None,
         "expire": now_utc(),
     }
-def has_active_subscription(
-    user_id: int,
-):
+def has_active_subscription(user_id: int):
     subscription = expire_user_if_needed(
         user_id
     )
@@ -345,14 +330,19 @@ def has_active_subscription(
         return False
     expire = subscription["expire"]
     return bool(
-        expire and expire > now_utc()
+        expire
+        and expire > now_utc()
     )
-def has_trial_used(
-    user_id: int,
-):
-    return github_get_file(
-        user_file(user_id, "trial")
-    ) is not None
+def has_trial_used(user_id: int):
+    return (
+        github_get_file(
+            user_file(
+                user_id,
+                "trial",
+            )
+        )
+        is not None
+    )
 # ============================================================
 # SUBSCRIPTION URL
 # ============================================================
@@ -371,19 +361,12 @@ def get_subscription_url(
         user_id=user_id
     )
 # ============================================================
-# HAPP CRYPT4
+# HAPP
 # ============================================================
 def generate_happ_crypt4(
     user_id: int,
     kind: str = "paid",
 ):
-    """
-    Generates legacy Happ crypt4 directly.
-    Result:
-        happ://crypt4/<base64>
-    It does not call the Happ API and therefore
-    cannot accidentally return crypt5.
-    """
     subscription_url = get_subscription_url(
         user_id,
         kind,
@@ -396,21 +379,17 @@ def generate_happ_crypt4(
             rsa_key
         )
         encrypted = cipher.encrypt(
-            subscription_url.encode("utf-8")
+            subscription_url.encode(
+                "utf-8"
+            )
         )
         encoded = base64.b64encode(
             encrypted
         ).decode("ascii")
-        result = (
+        return (
             "happ://crypt4/"
             + encoded
         )
-        logger.info(
-            "Generated crypt4 for %s (%s)",
-            user_id,
-            kind,
-        )
-        return result
     except Exception as e:
         logger.exception(
             "Crypt4 generation error: %s",
@@ -431,11 +410,20 @@ def load_users_info():
         value = json.loads(
             data["content"]
         )
-        if not isinstance(value, dict):
+        if not isinstance(
+            value,
+            dict,
+        ):
             value = {}
-        return value, data["sha"]
+        return (
+            value,
+            data["sha"],
+        )
     except Exception:
-        return {}, data["sha"]
+        return (
+            {},
+            data["sha"],
+        )
 def save_users_info(
     users,
     sha=None,
@@ -467,9 +455,7 @@ def save_user_info(
         users,
         sha,
     )
-def get_user_info(
-    user_id: int,
-):
+def get_user_info(user_id: int):
     users, _ = load_users_info()
     return users.get(
         str(user_id),
@@ -479,15 +465,6 @@ def get_user_info(
 # USERS
 # ============================================================
 def get_all_users():
-    response = github_request(
-        "GET",
-        "",
-        params={
-            "ref": REPO_BRANCH
-        },
-    )
-    # GitHub root doesn't contain all user files,
-    # so use Git Trees API.
     url = (
         f"https://api.github.com/repos/"
         f"{REPO_OWNER}/{REPO_NAME}/git/trees/"
@@ -501,12 +478,17 @@ def get_all_users():
     response.raise_for_status()
     tree = response.json().get(
         "tree",
-        []
+        [],
     )
     users = set()
     for item in tree:
-        path = item.get("path", "")
-        if not path.startswith("users/"):
+        path = item.get(
+            "path",
+            "",
+        )
+        if not path.startswith(
+            "users/"
+        ):
             continue
         filename = path.split(
             "/",
@@ -539,9 +521,11 @@ def extend_subscription(
         user_id,
         "paid",
     )
-    current_expire = None
-    if current:
-        current_expire = current["expire"]
+    current_expire = (
+        current["expire"]
+        if current
+        else None
+    )
     now = now_utc()
     if (
         current_expire
@@ -552,7 +536,9 @@ def extend_subscription(
         start = now
     new_expire = (
         start
-        + timedelta(days=duration_days)
+        + timedelta(
+            days=duration_days
+        )
     )
     content = generate_subscription_content(
         user_id,
@@ -594,7 +580,7 @@ def revoke_subscription(
     )
     return True
 # ============================================================
-# BLOCK USERS
+# BLOCK
 # ============================================================
 BLOCKS_PATH = "blocked.txt"
 def load_blocked():
@@ -610,7 +596,10 @@ def load_blocked():
             result.add(
                 int(line)
             )
-    return result, data["sha"]
+    return (
+        result,
+        data["sha"],
+    )
 def save_blocked(
     blocked,
     sha=None,
@@ -625,9 +614,7 @@ def save_blocked(
         "Update blocked users",
         sha,
     )
-def is_blocked(
-    user_id: int,
-):
+def is_blocked(user_id: int):
     blocked, _ = load_blocked()
     return user_id in blocked
 def set_blocked(
@@ -669,7 +656,10 @@ def load_promos():
         except Exception:
             continue
         result[code] = days
-    return result, data["sha"]
+    return (
+        result,
+        data["sha"],
+    )
 def save_promos(
     promos,
     sha=None,
@@ -714,9 +704,7 @@ def mark_promo_used(
         user_id,
         code,
     )
-    current = github_get_file(
-        path
-    )
+    current = github_get_file(path)
     github_put_file(
         path,
         now_utc().isoformat(),
@@ -734,7 +722,7 @@ def use_promo(
     if code not in promos:
         return (
             False,
-            "Промокод не найден."
+            "Промокод не найден.",
         )
     if promo_was_used(
         user_id,
@@ -742,7 +730,7 @@ def use_promo(
     ):
         return (
             False,
-            "Вы уже использовали этот промокод."
+            "Вы уже использовали этот промокод.",
         )
     days = promos[code]
     expire = extend_subscription(
@@ -755,9 +743,9 @@ def use_promo(
     )
     return (
         True,
-        f"Промокод активирован!\n"
+        "Промокод активирован!\n"
         f"Добавлено: {days} дн.\n"
-        f"До: {format_date(expire)}"
+        f"До: {format_date(expire)}",
     )
 # ============================================================
 # REVENUE
@@ -798,29 +786,23 @@ def add_revenue(
 # ============================================================
 # KEYBOARDS
 # ============================================================
-def main_keyboard(
-    user_id: int,
-):
+def main_keyboard(user_id: int):
     rows = [
         [
             InlineKeyboardButton(
-                text="🎁 Пробный период",
-                callback_data="trial",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="💎 Купить подписку",
+                text="💎 Купить",
                 callback_data="buy",
             ),
-        ],
-        [
             InlineKeyboardButton(
                 text="📱 Моя подписка",
                 callback_data="my_sub",
             ),
         ],
         [
+            InlineKeyboardButton(
+                text="🎁 Пробный период",
+                callback_data="trial",
+            ),
             InlineKeyboardButton(
                 text="🎟 Промокод",
                 callback_data="promo",
@@ -829,7 +811,7 @@ def main_keyboard(
         [
             InlineKeyboardButton(
                 text="🆘 Поддержка",
-                url="https://t.me/magnitsub",
+                callback_data="support",
             ),
         ],
     ]
@@ -837,7 +819,7 @@ def main_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="⚙️ Админ-панель",
+                    text="⚙️ АДМИН-ПАНЕЛЬ",
                     callback_data="admin",
                 )
             ]
@@ -861,25 +843,107 @@ def buy_keyboard():
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="1 месяц — 100 ⭐",
+                    text="1 месяц • 100 ⭐",
                     callback_data="buy_30",
-                )
-            ],
-            [
+                ),
                 InlineKeyboardButton(
-                    text="4 месяца — 300 ⭐",
+                    text="4 месяца • 300 ⭐",
                     callback_data="buy_120",
-                )
+                ),
             ],
             [
                 InlineKeyboardButton(
-                    text="8 месяцев — 650 ⭐",
+                    text="8 месяцев • 650 ⭐",
                     callback_data="buy_240",
-                )
+                ),
             ],
             [
                 InlineKeyboardButton(
                     text="⬅️ Назад",
+                    callback_data="back",
+                )
+            ],
+        ]
+    )
+def subscription_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔗 Открыть ссылку",
+                    callback_data="show_raw_link",
+                ),
+                InlineKeyboardButton(
+                    text="📱 Happ",
+                    callback_data="show_happ",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Обновить",
+                    callback_data="my_sub",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data="back",
+                )
+            ],
+        ]
+    )
+def admin_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📊 Статистика",
+                    callback_data="admin_stats",
+                ),
+                InlineKeyboardButton(
+                    text="👥 Пользователи",
+                    callback_data="admin_users",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔎 Поиск",
+                    callback_data="admin_find",
+                ),
+                InlineKeyboardButton(
+                    text="➕ Выдать",
+                    callback_data="admin_give",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="➖ Забрать",
+                    callback_data="admin_revoke",
+                ),
+                InlineKeyboardButton(
+                    text="🚫 Блокировка",
+                    callback_data="admin_block",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🎟 Промокоды",
+                    callback_data="admin_promos",
+                ),
+                InlineKeyboardButton(
+                    text="📢 Рассылка",
+                    callback_data="admin_broadcast",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Серверы",
+                    callback_data="admin_sync",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ В главное меню",
                     callback_data="back",
                 )
             ],
@@ -920,10 +984,9 @@ async def cmd_start(
         return
     text = (
         f"🧲 <b>{SERVICE_NAME}</b>\n\n"
-        f"Добро пожаловать, "
-        f"<b>{user.first_name or 'пользователь'}</b>!\n\n"
+        f"Привет, <b>{user.first_name or 'пользователь'}</b>!\n\n"
         "⚡ Быстрое подключение\n"
-        "🔐 Защищённая подписка\n"
+        "🔐 Личная подписка\n"
         "📱 Поддержка Happ\n\n"
         "Выберите действие:"
     )
@@ -952,15 +1015,16 @@ async def callback_trial(
         return
     if has_trial_used(user_id):
         await callback.message.edit_text(
-            "❌ Вы уже использовали "
-            "пробный период.",
+            "❌ <b>Пробный период уже использован</b>",
+            parse_mode="HTML",
             reply_markup=back_keyboard(),
         )
         return
-    now = now_utc()
     expire = (
-        now
-        + timedelta(days=TRIAL_DAYS)
+        now_utc()
+        + timedelta(
+            days=TRIAL_DAYS
+        )
     )
     content = generate_subscription_content(
         user_id,
@@ -980,26 +1044,32 @@ async def callback_trial(
         user_id,
         "trial",
     )
-    if not crypt4:
-        await callback.message.edit_text(
-            "❌ Не удалось создать "
-            "Happ crypt4.",
-            reply_markup=back_keyboard(),
-        )
-        return
+    raw_url = get_subscription_url(
+        user_id,
+        "trial",
+    )
     text = (
         "🎁 <b>Пробный период активирован!</b>\n\n"
-        f"⏳ Срок: {TRIAL_DAYS} дн.\n"
+        f"🟢 Статус: <b>Активна</b>\n"
+        f"⏳ Срок: <b>{TRIAL_DAYS} дн.</b>\n"
         f"📅 До: <b>{format_date(expire)}</b>\n\n"
-        "📱 <b>Ссылка для Happ:</b>\n"
-        f"<code>{crypt4}</code>\n\n"
-        "Нажмите на ссылку и добавьте её в Happ."
+        "🔗 <b>Личная ссылка:</b>\n"
+        f"<code>{raw_url}</code>\n\n"
+    )
+    if crypt4:
+        text += (
+            "📱 <b>Happ crypt4:</b>\n"
+            f"<code>{crypt4}</code>\n\n"
+        )
+    text += (
+        "Откройте ссылку в Happ для подключения."
     )
     await callback.message.edit_text(
         text,
         parse_mode="HTML",
-        reply_markup=back_keyboard(),
+        reply_markup=subscription_keyboard(),
     )
+    await callback.answer()
 # ============================================================
 # BUY
 # ============================================================
@@ -1010,12 +1080,12 @@ async def callback_buy(
     callback: CallbackQuery,
 ):
     await callback.message.edit_text(
-        "💎 <b>Выберите тариф</b>\n\n"
-        "Оплата производится через "
-        "Telegram Stars ⭐",
+        "💎 <b>Тарифы MAGNET.NET</b>\n\n"
+        "Оплата через Telegram Stars ⭐",
         parse_mode="HTML",
         reply_markup=buy_keyboard(),
     )
+    await callback.answer()
 @dp.callback_query(
     F.data.in_({
         "buy_30",
@@ -1078,7 +1148,7 @@ async def process_pre_checkout(
         ok=True
     )
 # ============================================================
-# SUCCESSFUL PAYMENT
+# PAYMENT
 # ============================================================
 @dp.message(
     F.successful_payment
@@ -1091,7 +1161,9 @@ async def successful_payment(
         return
     user_id = message.from_user.id
     try:
-        parts = payment.invoice_payload.split("_")
+        parts = payment.invoice_payload.split(
+            "_"
+        )
         days = int(parts[1])
     except Exception:
         await message.answer(
@@ -1112,25 +1184,26 @@ async def successful_payment(
         user_id,
         "paid",
     )
-    if not crypt4:
-        await message.answer(
-            "✅ Оплата прошла.\n\n"
-            "Но не удалось создать "
-            "ссылку Happ crypt4.\n"
-            f"Обратитесь в поддержку: "
-            f"{SUPPORT_USERNAME}"
-        )
-        return
+    raw_url = get_subscription_url(
+        user_id,
+        "paid",
+    )
     text = (
         "✅ <b>Оплата успешно получена!</b>\n\n"
-        f"🧲 {SERVICE_NAME}\n"
-        f"⏳ Добавлено: {days} дн.\n"
-        f"📅 Действует до: "
-        f"<b>{format_date(expire)}</b>\n\n"
-        "📱 <b>Happ crypt4:</b>\n"
-        f"<code>{crypt4}</code>\n\n"
-        "Нажмите на ссылку, чтобы "
-        "добавить подписку в Happ."
+        f"🧲 <b>{SERVICE_NAME}</b>\n"
+        f"➕ Добавлено: <b>{days} дн.</b>\n"
+        f"📅 До: <b>{format_date(expire)}</b>\n\n"
+        "🔗 <b>Личная ссылка:</b>\n"
+        f"<code>{raw_url}</code>\n\n"
+    )
+    if crypt4:
+        text += (
+            "📱 <b>Happ crypt4:</b>\n"
+            f"<code>{crypt4}</code>\n\n"
+        )
+    text += (
+        "Ссылка автоматически обновляется "
+        "при изменении подписки."
     )
     await message.answer(
         text,
@@ -1154,45 +1227,157 @@ async def callback_my_sub(
     )
     if not subscription:
         await callback.message.edit_text(
-            "📱 <b>Моя подписка</b>\n\n"
-            "У вас пока нет оплаченной подписки.",
+            "📱 <b>Личный кабинет</b>\n\n"
+            "🔴 <b>Подписка отсутствует</b>\n\n"
+            "Купите тариф, чтобы получить "
+            "личную ссылку.",
             parse_mode="HTML",
-            reply_markup=back_keyboard(),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="💎 Купить подписку",
+                            callback_data="buy",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="⬅️ Назад",
+                            callback_data="back",
+                        )
+                    ],
+                ]
+            ),
         )
+        await callback.answer()
         return
     expire = subscription["expire"]
     if expire and expire > now_utc():
+        raw_url = get_subscription_url(
+            user_id,
+            "paid",
+        )
         crypt4 = generate_happ_crypt4(
             user_id,
             "paid",
         )
         text = (
-            "📱 <b>Моя подписка</b>\n\n"
-            "🟢 Статус: <b>Активна</b>\n"
+            "📱 <b>ЛИЧНЫЙ КАБИНЕТ</b>\n\n"
+            "🟢 Статус: <b>АКТИВНА</b>\n"
             f"📅 До: <b>{format_date(expire)}</b>\n"
             f"⏳ Осталось: <b>{days_left(expire)} дн.</b>\n\n"
+            "🔗 <b>Твоя личная ссылка:</b>\n"
+            f"<code>{raw_url}</code>\n\n"
         )
         if crypt4:
             text += (
-                "📋 <b>Happ crypt4:</b>\n"
+                "📱 <b>Happ crypt4:</b>\n"
                 f"<code>{crypt4}</code>\n\n"
             )
         text += (
-            "🔄 Ссылка генерируется заново "
-            "при каждом открытии."
+            "ℹ️ Ссылка остаётся твоей и "
+            "обновляется при смене серверов."
+        )
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=subscription_keyboard(),
         )
     else:
         text = (
-            "📱 <b>Моя подписка</b>\n\n"
-            "🔴 Статус: <b>Завершена</b>\n\n"
-            f"🆘 Поддержка: "
-            f"{SUPPORT_USERNAME}"
+            "📱 <b>ЛИЧНЫЙ КАБИНЕТ</b>\n\n"
+            "🔴 Статус: <b>ЗАВЕРШЕНА</b>\n\n"
+            "Чтобы снова получить доступ, "
+            "продлите подписку."
         )
-    await callback.message.edit_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=back_keyboard(),
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="💎 Продлить",
+                            callback_data="buy",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="⬅️ Назад",
+                            callback_data="back",
+                        )
+                    ],
+                ]
+            ),
+        )
+    await callback.answer()
+# ============================================================
+# SHOW RAW LINK
+# ============================================================
+@dp.callback_query(
+    F.data == "show_raw_link"
+)
+async def show_raw_link(
+    callback: CallbackQuery,
+):
+    user_id = callback.from_user.id
+    subscription = expire_user_if_needed(
+        user_id
     )
+    if not subscription or not has_active_subscription(
+        user_id
+    ):
+        await callback.answer(
+            "Подписка неактивна.",
+            show_alert=True,
+        )
+        return
+    raw_url = get_subscription_url(
+        user_id,
+        "paid",
+    )
+    await callback.message.answer(
+        "🔗 <b>Твоя личная ссылка подписки:</b>\n\n"
+        f"<code>{raw_url}</code>\n\n"
+        "📋 Нажми на ссылку, чтобы скопировать её.",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+# ============================================================
+# SHOW HAPP
+# ============================================================
+@dp.callback_query(
+    F.data == "show_happ"
+)
+async def show_happ(
+    callback: CallbackQuery,
+):
+    user_id = callback.from_user.id
+    if not has_active_subscription(
+        user_id
+    ):
+        await callback.answer(
+            "Подписка неактивна.",
+            show_alert=True,
+        )
+        return
+    crypt4 = generate_happ_crypt4(
+        user_id,
+        "paid",
+    )
+    if not crypt4:
+        await callback.answer(
+            "Не удалось создать Happ-ссылку.",
+            show_alert=True,
+        )
+        return
+    await callback.message.answer(
+        "📱 <b>Ссылка для Happ:</b>\n\n"
+        f"<code>{crypt4}</code>\n\n"
+        "📋 Нажми на ссылку, чтобы скопировать её.",
+        parse_mode="HTML",
+    )
+    await callback.answer()
 # ============================================================
 # PROMO
 # ============================================================
@@ -1211,6 +1396,7 @@ async def callback_promo(
         parse_mode="HTML",
         reply_markup=back_keyboard(),
     )
+    await callback.answer()
 # ============================================================
 # SUPPORT
 # ============================================================
@@ -1222,12 +1408,15 @@ async def callback_support(
 ):
     await callback.message.edit_text(
         "🆘 <b>Поддержка MAGNET.NET</b>\n\n"
-        f"Написать администратору:\n"
-        f"👉 <a href=\"https://t.me/magnitsub\">"
-        f"@magnitsub</a>",
+        f"Администратор: "
+        f"<a href=\"https://t.me/magnitsub\">"
+        f"{SUPPORT_USERNAME}</a>\n\n"
+        "Если возникла проблема с подключением — "
+        "напишите в поддержку.",
         parse_mode="HTML",
         reply_markup=back_keyboard(),
     )
+    await callback.answer()
 # ============================================================
 # BACK
 # ============================================================
@@ -1238,6 +1427,11 @@ async def callback_back(
     callback: CallbackQuery,
 ):
     user_id = callback.from_user.id
+    promo_waiting.discard(user_id)
+    admin_states.pop(
+        user_id,
+        None,
+    )
     await callback.message.edit_text(
         f"🧲 <b>{SERVICE_NAME}</b>\n\n"
         "Выберите действие:",
@@ -1246,77 +1440,11 @@ async def callback_back(
             user_id
         ),
     )
+    await callback.answer()
 # ============================================================
-# ADMIN MENU
+# ADMIN
 # ============================================================
-def admin_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📊 Статистика",
-                    callback_data="admin_stats",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👥 Пользователи",
-                    callback_data="admin_users",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔎 Найти пользователя",
-                    callback_data="admin_find",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="➕ Выдать подписку",
-                    callback_data="admin_give",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="➖ Забрать подписку",
-                    callback_data="admin_revoke",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🚫 Заблокировать",
-                    callback_data="admin_block",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🎟 Промокоды",
-                    callback_data="admin_promos",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📢 Рассылка",
-                    callback_data="admin_broadcast",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔄 Обновить серверы",
-                    callback_data="admin_sync",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data="back",
-                ),
-            ],
-        ]
-    )
-def is_admin(
-    user_id: int,
-):
+def is_admin(user_id: int):
     return user_id in ADMIN_IDS
 @dp.callback_query(
     F.data == "admin"
@@ -1333,11 +1461,13 @@ async def callback_admin(
         )
         return
     await callback.message.edit_text(
-        "⚙️ <b>Админ-панель</b>\n\n"
-        "Выберите действие:",
+        "⚙️ <b>АДМИН-ПАНЕЛЬ</b>\n\n"
+        "Управление MAGNET.NET\n\n"
+        "Выберите нужный раздел:",
         parse_mode="HTML",
         reply_markup=admin_keyboard(),
     )
+    await callback.answer()
 # ============================================================
 # ADMIN STATS
 # ============================================================
@@ -1363,17 +1493,18 @@ async def admin_stats(
             expired += 1
     promos, _ = load_promos()
     text = (
-        "📊 <b>Статистика</b>\n\n"
-        f"👥 Пользователей: <b>{len(users)}</b>\n"
-        f"🟢 Активных: <b>{active}</b>\n"
+        "📊 <b>СТАТИСТИКА</b>\n\n"
+        f"👥 Всего пользователей: <b>{len(users)}</b>\n"
+        f"🟢 Активных подписок: <b>{active}</b>\n"
         f"🔴 Неактивных: <b>{expired}</b>\n"
         f"🎟 Промокодов: <b>{len(promos)}</b>"
     )
     await callback.message.edit_text(
         text,
         parse_mode="HTML",
-        reply_markup=back_keyboard(),
+        reply_markup=admin_keyboard(),
     )
+    await callback.answer()
 # ============================================================
 # ADMIN USERS
 # ============================================================
@@ -1389,10 +1520,14 @@ async def admin_users(
         return
     users = get_all_users()
     if not users:
-        text = "👥 Пользователей пока нет."
+        text = (
+            "👥 <b>ПОЛЬЗОВАТЕЛИ</b>\n\n"
+            "Пользователей пока нет."
+        )
     else:
         lines = [
-            "👥 <b>Пользователи</b>\n"
+            "👥 <b>ПОЛЬЗОВАТЕЛИ</b>",
+            "",
         ]
         for uid in users[:50]:
             info = get_user_info(uid)
@@ -1407,15 +1542,19 @@ async def admin_users(
                 else "🔴"
             )
             lines.append(
-                f"{status} <code>{uid}</code> — "
-                f"{name}"
+                f"{status} <code>{uid}</code> — {name}"
+            )
+        if len(users) > 50:
+            lines.append(
+                f"\nПоказаны первые 50 из {len(users)}."
             )
         text = "\n".join(lines)
     await callback.message.edit_text(
         text,
         parse_mode="HTML",
-        reply_markup=back_keyboard(),
+        reply_markup=admin_keyboard(),
     )
+    await callback.answer()
 # ============================================================
 # ADMIN FIND
 # ============================================================
@@ -1433,11 +1572,12 @@ async def admin_find(
         callback.from_user.id
     ] = "find"
     await callback.message.edit_text(
-        "🔎 <b>Поиск пользователя</b>\n\n"
+        "🔎 <b>ПОИСК ПОЛЬЗОВАТЕЛЯ</b>\n\n"
         "Отправьте Telegram ID.",
         parse_mode="HTML",
         reply_markup=back_keyboard(),
     )
+    await callback.answer()
 # ============================================================
 # ADMIN GIVE
 # ============================================================
@@ -1455,14 +1595,15 @@ async def admin_give(
         callback.from_user.id
     ] = "give"
     await callback.message.edit_text(
-        "➕ <b>Выдать подписку</b>\n\n"
-        "Формат:\n"
+        "➕ <b>ВЫДАТЬ ПОДПИСКУ</b>\n\n"
+        "Отправьте:\n\n"
         "<code>ID ДНИ</code>\n\n"
-        "Например:\n"
+        "Пример:\n"
         "<code>123456789 30</code>",
         parse_mode="HTML",
         reply_markup=back_keyboard(),
     )
+    await callback.answer()
 # ============================================================
 # ADMIN REVOKE
 # ============================================================
@@ -1480,11 +1621,12 @@ async def admin_revoke(
         callback.from_user.id
     ] = "revoke"
     await callback.message.edit_text(
-        "➖ <b>Забрать подписку</b>\n\n"
+        "➖ <b>ЗАБРАТЬ ПОДПИСКУ</b>\n\n"
         "Отправьте Telegram ID.",
         parse_mode="HTML",
         reply_markup=back_keyboard(),
     )
+    await callback.answer()
 # ============================================================
 # ADMIN BLOCK
 # ============================================================
@@ -1502,11 +1644,12 @@ async def admin_block(
         callback.from_user.id
     ] = "block"
     await callback.message.edit_text(
-        "🚫 <b>Блокировка</b>\n\n"
+        "🚫 <b>БЛОКИРОВКА</b>\n\n"
         "Отправьте Telegram ID.",
         parse_mode="HTML",
         reply_markup=back_keyboard(),
     )
+    await callback.answer()
 # ============================================================
 # ADMIN PROMOS
 # ============================================================
@@ -1522,7 +1665,8 @@ async def admin_promos(
         return
     promos, _ = load_promos()
     lines = [
-        "🎟 <b>Промокоды</b>\n"
+        "🎟 <b>ПРОМОКОДЫ</b>",
+        "",
     ]
     if not promos:
         lines.append(
@@ -1531,13 +1675,17 @@ async def admin_promos(
     else:
         for code, days in promos.items():
             lines.append(
-                f"<code>{code}</code> — "
-                f"{days} дн."
+                f"🎟 <code>{code}</code> — {days} дн."
             )
-    lines.append(
-        "\nЧтобы создать промокод, "
-        "отправьте:\n"
-        "<code>КОД ДНИ</code>"
+    lines.extend(
+        [
+            "",
+            "Для создания отправьте:",
+            "<code>КОД ДНИ</code>",
+            "",
+            "Например:",
+            "<code>MAGNET30 30</code>",
+        ]
     )
     admin_states[
         callback.from_user.id
@@ -1547,6 +1695,7 @@ async def admin_promos(
         parse_mode="HTML",
         reply_markup=back_keyboard(),
     )
+    await callback.answer()
 # ============================================================
 # ADMIN BROADCAST
 # ============================================================
@@ -1564,11 +1713,14 @@ async def admin_broadcast(
         callback.from_user.id
     ] = "broadcast"
     await callback.message.edit_text(
-        "📢 <b>Рассылка</b>\n\n"
-        "Отправьте текст сообщения.",
+        "📢 <b>РАССЫЛКА</b>\n\n"
+        "Отправьте текст сообщения.\n\n"
+        "Сообщение будет отправлено всем "
+        "найденным пользователям.",
         parse_mode="HTML",
         reply_markup=back_keyboard(),
     )
+    await callback.answer()
 # ============================================================
 # ADMIN SYNC
 # ============================================================
@@ -1582,6 +1734,9 @@ async def admin_sync(
         callback.from_user.id
     ):
         return
+    await callback.answer(
+        "Синхронизация запущена..."
+    )
     users = get_all_users()
     updated = 0
     for uid in users:
@@ -1591,9 +1746,7 @@ async def admin_sync(
         )
         if not subscription:
             continue
-        expire = subscription[
-            "expire"
-        ]
+        expire = subscription["expire"]
         if expire and expire > now_utc():
             content = generate_subscription_content(
                 uid,
@@ -1608,18 +1761,16 @@ async def admin_sync(
             )
             updated += 1
     await callback.message.edit_text(
-        "🔄 <b>Синхронизация завершена</b>\n\n"
-        f"Обновлено подписок: "
-        f"<b>{updated}</b>",
+        "🔄 <b>СИНХРОНИЗАЦИЯ ЗАВЕРШЕНА</b>\n\n"
+        f"👥 Проверено: <b>{len(users)}</b>\n"
+        f"🔄 Обновлено: <b>{updated}</b>",
         parse_mode="HTML",
-        reply_markup=back_keyboard(),
+        reply_markup=admin_keyboard(),
     )
 # ============================================================
 # TEXT HANDLER
 # ============================================================
-@dp.message(
-    F.text
-)
+@dp.message(F.text)
 async def text_handler(
     message: Message,
 ):
@@ -1630,16 +1781,13 @@ async def text_handler(
     text = (
         message.text or ""
     ).strip()
-    # --------------------------------------------------------
-    # BLOCK
-    # --------------------------------------------------------
     if is_blocked(user_id):
         await message.answer(
             "🚫 Доступ к боту ограничен."
         )
         return
     # --------------------------------------------------------
-    # PROMO USER
+    # USER PROMO
     # --------------------------------------------------------
     if user_id in promo_waiting:
         promo_waiting.discard(
@@ -1654,8 +1802,7 @@ async def text_handler(
                 "✅ "
                 if ok
                 else "❌ "
-            )
-            + result,
+            ) + result,
             parse_mode="HTML",
             reply_markup=main_keyboard(
                 user_id
@@ -1663,17 +1810,20 @@ async def text_handler(
         )
         return
     # --------------------------------------------------------
-    # ADMIN STATES
+    # ADMIN
     # --------------------------------------------------------
     if is_admin(user_id):
         state = admin_states.get(
             user_id
         )
+        # ----------------------------------------------------
+        # FIND
+        # ----------------------------------------------------
         if state == "find":
             if not text.isdigit():
                 await message.answer(
-                    "❌ ID должен состоять "
-                    "только из цифр."
+                    "❌ Telegram ID должен "
+                    "состоять только из цифр."
                 )
                 return
             target_id = int(text)
@@ -1685,15 +1835,14 @@ async def text_handler(
                 "paid",
             )
             if subscription:
-                expire = subscription[
-                    "expire"
-                ]
-                status = (
-                    "🟢 Активна"
-                    if expire
+                expire = subscription["expire"]
+                if (
+                    expire
                     and expire > now_utc()
-                    else "🔴 Завершена"
-                )
+                ):
+                    status = "🟢 Активна"
+                else:
+                    status = "🔴 Завершена"
                 expiry = format_date(
                     expire
                 )
@@ -1705,12 +1854,17 @@ async def text_handler(
                 or info.get("username")
                 or "—"
             )
+            raw_url = get_subscription_url(
+                target_id,
+                "paid",
+            )
             await message.answer(
-                "🔎 <b>Пользователь</b>\n\n"
+                "🔎 <b>ПОЛЬЗОВАТЕЛЬ</b>\n\n"
                 f"👤 {name}\n"
                 f"🆔 <code>{target_id}</code>\n"
                 f"📱 Статус: {status}\n"
-                f"📅 До: {expiry}",
+                f"📅 До: {expiry}\n\n"
+                f"🔗 <code>{raw_url}</code>",
                 parse_mode="HTML",
                 reply_markup=admin_keyboard(),
             )
@@ -1719,6 +1873,9 @@ async def text_handler(
                 None,
             )
             return
+        # ----------------------------------------------------
+        # GIVE
+        # ----------------------------------------------------
         if state == "give":
             parts = text.split()
             if len(parts) != 2:
@@ -1733,7 +1890,13 @@ async def text_handler(
                 days = int(parts[1])
             except ValueError:
                 await message.answer(
-                    "❌ Неверные данные."
+                    "❌ ID и количество дней "
+                    "должны быть числами."
+                )
+                return
+            if target_id <= 0 or days <= 0:
+                await message.answer(
+                    "❌ Значения должны быть больше нуля."
                 )
                 return
             expire = extend_subscription(
@@ -1744,8 +1907,16 @@ async def text_handler(
                 user_id,
                 None,
             )
+            raw_url = get_subscription_url(
+                target_id,
+                "paid",
+            )
+            crypt4 = generate_happ_crypt4(
+                target_id,
+                "paid",
+            )
             await message.answer(
-                "✅ <b>Подписка выдана</b>\n\n"
+                "✅ <b>ПОДПИСКА ВЫДАНА</b>\n\n"
                 f"🆔 <code>{target_id}</code>\n"
                 f"➕ {days} дн.\n"
                 f"📅 До: <b>{format_date(expire)}</b>",
@@ -1753,21 +1924,32 @@ async def text_handler(
                 reply_markup=admin_keyboard(),
             )
             try:
-                crypt4 = generate_happ_crypt4(
-                    target_id,
-                    "paid",
-                )
-                await bot.send_message(
-                    target_id,
+                notify_text = (
                     "🎁 <b>Администратор выдал вам подписку!</b>\n\n"
                     f"📅 До: <b>{format_date(expire)}</b>\n\n"
-                    f"📱 Happ crypt4:\n"
-                    f"<code>{crypt4}</code>",
+                    "🔗 <b>Личная ссылка:</b>\n"
+                    f"<code>{raw_url}</code>\n\n"
+                )
+                if crypt4:
+                    notify_text += (
+                        "📱 <b>Happ crypt4:</b>\n"
+                        f"<code>{crypt4}</code>"
+                    )
+                await bot.send_message(
+                    target_id,
+                    notify_text,
                     parse_mode="HTML",
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "Cannot notify user %s: %s",
+                    target_id,
+                    e,
+                )
             return
+        # ----------------------------------------------------
+        # REVOKE
+        # ----------------------------------------------------
         if state == "revoke":
             if not text.isdigit():
                 await message.answer(
@@ -1791,6 +1973,9 @@ async def text_handler(
                 reply_markup=admin_keyboard(),
             )
             return
+        # ----------------------------------------------------
+        # BLOCK
+        # ----------------------------------------------------
         if state == "block":
             if not text.isdigit():
                 await message.answer(
@@ -1807,13 +1992,15 @@ async def text_handler(
                 None,
             )
             await message.answer(
-                f"🚫 Пользователь "
-                f"<code>{target_id}</code> "
-                f"заблокирован.",
+                "🚫 <b>Пользователь заблокирован</b>\n\n"
+                f"🆔 <code>{target_id}</code>",
                 parse_mode="HTML",
                 reply_markup=admin_keyboard(),
             )
             return
+        # ----------------------------------------------------
+        # PROMO ADD
+        # ----------------------------------------------------
         if state == "promo_add":
             parts = text.split()
             if len(parts) != 2:
@@ -1832,6 +2019,11 @@ async def text_handler(
                     "быть числом."
                 )
                 return
+            if days <= 0:
+                await message.answer(
+                    "❌ Дни должны быть больше нуля."
+                )
+                return
             promos, sha = load_promos()
             promos[code] = days
             save_promos(
@@ -1843,13 +2035,16 @@ async def text_handler(
                 None,
             )
             await message.answer(
-                "✅ <b>Промокод создан</b>\n\n"
+                "✅ <b>ПРОМОКОД СОЗДАН</b>\n\n"
                 f"🎟 <code>{code}</code>\n"
                 f"⏳ {days} дн.",
                 parse_mode="HTML",
                 reply_markup=admin_keyboard(),
             )
             return
+        # ----------------------------------------------------
+        # BROADCAST
+        # ----------------------------------------------------
         if state == "broadcast":
             admin_states.pop(
                 user_id,
@@ -1872,15 +2067,15 @@ async def text_handler(
                 except Exception:
                     failed += 1
             await message.answer(
-                "📢 <b>Рассылка завершена</b>\n\n"
-                f"✅ Отправлено: {sent}\n"
-                f"❌ Ошибок: {failed}",
+                "📢 <b>РАССЫЛКА ЗАВЕРШЕНА</b>\n\n"
+                f"✅ Отправлено: <b>{sent}</b>\n"
+                f"❌ Ошибок: <b>{failed}</b>",
                 parse_mode="HTML",
                 reply_markup=admin_keyboard(),
             )
             return
     # --------------------------------------------------------
-    # UNKNOWN TEXT
+    # UNKNOWN
     # --------------------------------------------------------
     await message.answer(
         f"🧲 <b>{SERVICE_NAME}</b>\n\n"
