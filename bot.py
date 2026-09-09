@@ -1,10 +1,12 @@
 import asyncio
 import base64
+import json
 import logging
 import math
 import os
 import time
 from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Optional
 
 import requests
@@ -35,6 +37,7 @@ NO_SERVERS_FILE = os.getenv("NO_SERVERS_FILE", "no_servers.txt")
 USERS_DIR = os.getenv("USERS_DIR", "users")
 REVENUE_FILE = os.getenv("REVENUE_FILE", "revenue.txt")
 PROMOS_FILE = os.getenv("PROMOS_FILE", "promos.txt")
+USERS_INFO_FILE = os.getenv("USERS_INFO_FILE", "users_info.json")
 
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "2"))
 
@@ -159,7 +162,6 @@ def parse_user_file(content: str) -> Optional[dict]:
     return {"servers": servers, "expire_date": expire_date}
 
 async def check_and_cleanup_expired(user_id: int):
-    # paid
     paid_path = get_user_file_path(user_id, "paid")
     paid_content = github_get_file(paid_path)
     if paid_content:
@@ -169,7 +171,6 @@ async def check_and_cleanup_expired(user_id: int):
             new_content = generate_subscription_content(stub_servers)
             github_put_file(paid_path, new_content, f"Expired paid for user {user_id}")
 
-    # trial
     trial_path = get_user_file_path(user_id, "trial")
     trial_content = github_get_file(trial_path)
     if trial_content:
@@ -195,7 +196,6 @@ async def has_trial_used(user_id: int) -> bool:
 
 async def get_active_subscription_info(user_id: int) -> Optional[dict]:
     await check_and_cleanup_expired(user_id)
-    # Сначала paid
     paid_path = get_user_file_path(user_id, "paid")
     content = github_get_file(paid_path)
     if content:
@@ -203,7 +203,6 @@ async def get_active_subscription_info(user_id: int) -> Optional[dict]:
         if parsed and parsed["expire_date"] and parsed["expire_date"] >= datetime.now():
             parsed["kind"] = "paid"
             return parsed
-    # Затем trial
     trial_path = get_user_file_path(user_id, "trial")
     content = github_get_file(trial_path)
     if content:
@@ -232,6 +231,32 @@ def get_revenue() -> int:
     except:
         return 0
 
+# ==================== USERS INFO (имя/username) ====================
+def load_users_info() -> dict:
+    content = github_get_file(USERS_INFO_FILE)
+    if content:
+        try:
+            return json.loads(content)
+        except:
+            pass
+    return {}
+
+def save_users_info(info: dict):
+    github_put_file(USERS_INFO_FILE, json.dumps(info, ensure_ascii=False), "Update users info")
+
+def save_user_info(user_id: int, first_name: str = "", username: str = ""):
+    info = load_users_info()
+    info[str(user_id)] = {
+        "first_name": first_name,
+        "username": username,
+    }
+    save_users_info(info)
+
+def get_user_meta(user_id: int) -> dict:
+    info = load_users_info()
+    return info.get(str(user_id), {})
+
+# ==================== ПОЛЬЗОВАТЕЛИ ====================
 def get_all_user_ids() -> list[int]:
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/git/trees/{BRANCH}?recursive=1"
     headers = {"Authorization": f"token {GITHUB_TOKEN}"}
@@ -254,6 +279,13 @@ def get_all_user_ids() -> list[int]:
                     ids.add(int(fname[6:-4]))
                 except:
                     pass
+    # Добавляем тех, кто есть в users_info, но нет файлов подписок
+    info = load_users_info()
+    for uid_str in info.keys():
+        try:
+            ids.add(int(uid_str))
+        except:
+            pass
     return sorted(ids)
 
 def get_user(user_id: int) -> Optional[dict]:
@@ -261,7 +293,18 @@ def get_user(user_id: int) -> Optional[dict]:
     trial_path = get_user_file_path(user_id, "trial")
     paid_content = github_get_file(paid_path)
     trial_content = github_get_file(trial_path)
-    data = {"user_id": user_id, "blocked": False, "subscription": None, "expire_date": None}
+    data = {
+        "user_id": user_id,
+        "blocked": False,
+        "subscription": None,
+        "expire_date": None,
+        "first_name": "",
+        "username": "",
+    }
+    meta = get_user_meta(user_id)
+    if meta:
+        data["first_name"] = meta.get("first_name", "")
+        data["username"] = meta.get("username", "")
     blocked_path = f"{USERS_DIR}/blocked_{user_id}.txt"
     if github_get_file(blocked_path):
         data["blocked"] = True
@@ -272,7 +315,7 @@ def get_user(user_id: int) -> Optional[dict]:
                 data["subscription"] = kind
                 data["expire_date"] = parsed["expire_date"]
                 break
-    return data if data["subscription"] else None
+    return data if data["subscription"] or data["blocked"] or data["first_name"] or data["username"] else None
 
 def extend_subscription(user_id: int, days: int):
     paid_path = get_user_file_path(user_id, "paid")
@@ -324,6 +367,24 @@ def get_all_promos() -> list[tuple[str, int]]:
                     pass
     return result
 
+# ==================== HAPP LINK ====================
+def generate_happ_link(raw_url: str) -> str:
+    # Формат: t.me/happ_client_bot?startapp=crypt4_<base64url(raw_url)>
+    encoded = base64.urlsafe_b64encode(raw_url.encode()).decode().rstrip("=")
+    return f"https://t.me/happ_client_bot?startapp=crypt4_{encoded}"
+
+# ==================== HEALTH CHECK SERVER ====================
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def run_health_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+
 # ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -373,6 +434,13 @@ def back_to_admin_keyboard():
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
+    user_id = message.from_user.id
+    # Сохраняем информацию о пользователе
+    save_user_info(
+        user_id,
+        first_name=message.from_user.first_name or "",
+        username=message.from_user.username or ""
+    )
     await message.answer(
         "👋 Добро пожаловать в VPN бот!\n\n"
         "Здесь вы можете получить доступ к нашим серверам.\n"
@@ -405,7 +473,7 @@ async def process_trial(callback: CallbackQuery):
             f"🎉 Пробный период активирован!\n"
             f"Длительность: {TRIAL_DAYS} дня\n"
             f"Дата окончания: {expire_date.strftime('%Y-%m-%d')}\n\n"
-            f"Серверы:\n" + "\n".join(servers)
+            f"Ссылка на подписку будет доступна в разделе «Моя подписка»."
         )
     else:
         await callback.message.edit_text("❌ Ошибка при активации.")
@@ -459,12 +527,18 @@ async def successful_payment(message: Message):
     success = github_put_file(path, content, f"Paid subscription for user {user_id}")
     if success:
         update_revenue(price)
+        # Сохраняем информацию о пользователе
+        save_user_info(
+            user_id,
+            first_name=message.from_user.first_name or "",
+            username=message.from_user.username or ""
+        )
         await message.answer(
             f"✅ Подписка успешно оплачена и активирована!\n"
             f"Тариф: {tariff.replace('_', ' ').capitalize()}\n"
             f"Срок: {days} дней\n"
             f"Дата окончания: {expire_date.strftime('%Y-%m-%d')}\n\n"
-            f"Серверы:\n" + "\n".join(servers)
+            f"Управлять подпиской можно в разделе «Моя подписка»."
         )
     else:
         await message.answer("❌ Ошибка при создании подписки.")
@@ -478,16 +552,17 @@ async def process_my_sub(callback: CallbackQuery):
         kind = info["kind"]
         expire = info["expire_date"].strftime("%Y-%m-%d")
         raw_url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/{BRANCH}/{USERS_DIR}/{kind}_{user_id}.txt"
+        happ_url = generate_happ_link(raw_url)
         text = (
             f"📋 <b>Ваша подписка</b>\n\n"
             f"🌐 Название: <b>MAGNET.NET</b>\n"
-            f"📅 Действует до: <b>{expire}</b>\n"
-            f"🔗 Ссылка на подписку:\n"
-            f"<code>{raw_url}</code>\n\n"
-            f"Серверы:\n" + "\n".join(info["servers"])
+            f"📅 Действует до: <b>{expire}</b>\n\n"
+            f"🔗 <b>Raw-ссылка:</b>\n<code>{raw_url}</code>\n\n"
+            f"⚡ <b>Happ (crypt4):</b>\n<code>{happ_url}</code>"
         )
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 Открыть подписку", url=raw_url)],
+            [InlineKeyboardButton(text="🔗 Открыть raw", url=raw_url)],
+            [InlineKeyboardButton(text="⚡ Открыть в Happ", url=happ_url)],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")]
         ])
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
@@ -564,10 +639,16 @@ async def admin_users(callback: CallbackQuery):
     rows = []
     for uid in current:
         user = get_user(uid)
-        status = "🟢" if (user and user["subscription"]) else "🔴"
+        if not user:
+            continue
+        status = "🟢" if user.get("subscription") else "🔴"
+        name = user.get("first_name") or user.get("username") or str(uid)
+        label = f"{status} {name}"
+        if len(label) > 30:
+            label = label[:27] + "..."
         rows.append([
             InlineKeyboardButton(
-                text=f"{status} {uid}",
+                text=label,
                 callback_data=f"admin:user:{uid}"
             )
         ])
@@ -597,8 +678,12 @@ async def admin_user(callback: CallbackQuery):
         return
     expire = user["expire_date"].strftime("%Y-%m-%d") if user["expire_date"] else "нет"
     blocked = user["blocked"]
+    username = user.get("username") or "нет"
+    first_name = user.get("first_name") or "нет"
     text = (
-        f"👤 <b>Пользователь {uid}</b>\n\n"
+        f"👤 <b>Пользователь {uid}</b>\n"
+        f"Имя: <b>{first_name}</b>\n"
+        f"Username: @{username}\n"
         f"Статус: {'🔴 Заблокирован' if blocked else '🟢 Активен' if user['subscription'] else '🔴 Неактивен'}\n"
         f"Подписка: {user['subscription'] or 'нет'}\n"
         f"Действует до: {expire}\n\n"
@@ -802,6 +887,8 @@ async def admin_text_handler(message: Message):
         expire = user["expire_date"].strftime("%Y-%m-%d") if user["expire_date"] else "нет"
         await message.answer(
             f"👤 <b>Пользователь {uid}</b>\n"
+            f"Имя: {user.get('first_name') or 'нет'}\n"
+            f"Username: @{user.get('username') or 'нет'}\n"
             f"Статус: {'🔴 Заблокирован' if user['blocked'] else '🟢 Активен' if user['subscription'] else '🔴 Неактивен'}\n"
             f"Подписка: {user['subscription'] or 'нет'}\n"
             f"Действует до: {expire}",
@@ -910,6 +997,12 @@ async def main():
         github_put_file(REVENUE_FILE, "0", "Init revenue.txt")
     if not github_get_file(PROMOS_FILE):
         github_put_file(PROMOS_FILE, "", "Init promos.txt")
+    if not github_get_file(USERS_INFO_FILE):
+        github_put_file(USERS_INFO_FILE, "{}", "Init users info")
+
+    # Запуск health-check сервера в отдельном потоке
+    import threading
+    threading.Thread(target=run_health_server, daemon=True).start()
 
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
