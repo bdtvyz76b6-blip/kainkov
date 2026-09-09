@@ -1,8 +1,15 @@
-#profile-title: 𝗠𝗔𝗚𝗡𝗘𝗧.𝗡𝗘𝗧
+#profile-title: MAGNET - 7631124462
 #profile-update-interval: 1
 #subscription-userinfo: upload=0; download=0; total=0; expire=1961734324
 #hide-settings: true
 #happ-hide-settings: true
 #hide_server_settings: true
 #hidesettings: true
+#announce: Подписка активна • 🧲 всё работает!
+# MAGNET.NET
+# ID: 7631124462
+# EXPIRE: 2032-03-01T06:12:04+00:00
+# SUPPORT: @magnitsub
+# Список серверов
+
 vless://c11b64d6-66dd-4c55-9b57-459cd6469939@media-se.compressor.work:14443?encryption=none&security=tls&sni=media-se.compressor.work&fp=chrome&type=ws&host=media-se.compressor.work&path=/ws#🇪🇺 𝗠𝗔𝗚𝗡𝗜𝗧 | 1 | 𝗔𝗟𝗟
