@@ -279,7 +279,6 @@ def get_all_user_ids() -> list[int]:
                     ids.add(int(fname[6:-4]))
                 except:
                     pass
-    # Добавляем тех, кто есть в users_info, но нет файлов подписок
     info = load_users_info()
     for uid_str in info.keys():
         try:
@@ -368,10 +367,15 @@ def get_all_promos() -> list[tuple[str, int]]:
     return result
 
 # ==================== HAPP LINK ====================
-def generate_happ_link(raw_url: str) -> str:
-    # Формат: t.me/happ_client_bot?startapp=crypt4_<base64url(raw_url)>
+def generate_happ_link(user_id: int, kind: str = "paid") -> str:
+    """
+    Генерирует ссылку happ://crypt4/<base64 от raw_url>.
+    Вместо raw_url мы вставляем base64-кодированную строку raw_url.
+    Если необходимо использовать другой алгоритм (например, шифрование) — замените эту функцию.
+    """
+    raw_url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/{BRANCH}/{USERS_DIR}/{kind}_{user_id}.txt"
     encoded = base64.urlsafe_b64encode(raw_url.encode()).decode().rstrip("=")
-    return f"https://t.me/happ_client_bot?startapp=crypt4_{encoded}"
+    return f"happ://crypt4/{encoded}"
 
 # ==================== HEALTH CHECK SERVER ====================
 class HealthHandler(BaseHTTPRequestHandler):
@@ -435,7 +439,6 @@ def back_to_admin_keyboard():
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.from_user.id
-    # Сохраняем информацию о пользователе
     save_user_info(
         user_id,
         first_name=message.from_user.first_name or "",
@@ -473,7 +476,7 @@ async def process_trial(callback: CallbackQuery):
             f"🎉 Пробный период активирован!\n"
             f"Длительность: {TRIAL_DAYS} дня\n"
             f"Дата окончания: {expire_date.strftime('%Y-%m-%d')}\n\n"
-            f"Ссылка на подписку будет доступна в разделе «Моя подписка»."
+            f"Подключение доступно в разделе «Моя подписка»."
         )
     else:
         await callback.message.edit_text("❌ Ошибка при активации.")
@@ -527,7 +530,6 @@ async def successful_payment(message: Message):
     success = github_put_file(path, content, f"Paid subscription for user {user_id}")
     if success:
         update_revenue(price)
-        # Сохраняем информацию о пользователе
         save_user_info(
             user_id,
             first_name=message.from_user.first_name or "",
@@ -538,7 +540,7 @@ async def successful_payment(message: Message):
             f"Тариф: {tariff.replace('_', ' ').capitalize()}\n"
             f"Срок: {days} дней\n"
             f"Дата окончания: {expire_date.strftime('%Y-%m-%d')}\n\n"
-            f"Управлять подпиской можно в разделе «Моя подписка»."
+            f"Подключение доступно в разделе «Моя подписка»."
         )
     else:
         await message.answer("❌ Ошибка при создании подписки.")
@@ -551,17 +553,16 @@ async def process_my_sub(callback: CallbackQuery):
     if info:
         kind = info["kind"]
         expire = info["expire_date"].strftime("%Y-%m-%d")
-        raw_url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/{BRANCH}/{USERS_DIR}/{kind}_{user_id}.txt"
-        happ_url = generate_happ_link(raw_url)
+        happ_url = generate_happ_link(user_id, kind)
         text = (
             f"📋 <b>Ваша подписка</b>\n\n"
             f"🌐 Название: <b>MAGNET.NET</b>\n"
             f"📅 Действует до: <b>{expire}</b>\n\n"
-            f"🔗 <b>Raw-ссылка:</b>\n<code>{raw_url}</code>\n\n"
-            f"⚡ <b>Happ (crypt4):</b>\n<code>{happ_url}</code>"
+            f"⚡ <b>Ссылка для подключения (Happ):</b>\n"
+            f"<code>{happ_url}</code>\n\n"
+            f"Нажмите кнопку ниже, чтобы открыть в Happ."
         )
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 Открыть raw", url=raw_url)],
             [InlineKeyboardButton(text="⚡ Открыть в Happ", url=happ_url)],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_main")]
         ])
@@ -680,6 +681,9 @@ async def admin_user(callback: CallbackQuery):
     blocked = user["blocked"]
     username = user.get("username") or "нет"
     first_name = user.get("first_name") or "нет"
+    # Для админа также показываем crypt4 (вместо raw)
+    kind = user.get("subscription") or "paid"
+    happ_url = generate_happ_link(uid, kind)
     text = (
         f"👤 <b>Пользователь {uid}</b>\n"
         f"Имя: <b>{first_name}</b>\n"
@@ -687,7 +691,7 @@ async def admin_user(callback: CallbackQuery):
         f"Статус: {'🔴 Заблокирован' if blocked else '🟢 Активен' if user['subscription'] else '🔴 Неактивен'}\n"
         f"Подписка: {user['subscription'] or 'нет'}\n"
         f"Действует до: {expire}\n\n"
-        f"🔗 RAW: <code>https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/{BRANCH}/{USERS_DIR}/paid_{uid}.txt</code>"
+        f"⚡ Crypt4: <code>{happ_url}</code>"
     )
     rows = [
         [InlineKeyboardButton(text="➕ 30 дней", callback_data=f"admin:add:{uid}:30"),
@@ -885,13 +889,16 @@ async def admin_text_handler(message: Message):
             await message.answer("❌ Пользователь не найден.", reply_markup=admin_menu_keyboard())
             return
         expire = user["expire_date"].strftime("%Y-%m-%d") if user["expire_date"] else "нет"
+        kind = user.get("subscription") or "paid"
+        happ_url = generate_happ_link(uid, kind)
         await message.answer(
             f"👤 <b>Пользователь {uid}</b>\n"
             f"Имя: {user.get('first_name') or 'нет'}\n"
             f"Username: @{user.get('username') or 'нет'}\n"
             f"Статус: {'🔴 Заблокирован' if user['blocked'] else '🟢 Активен' if user['subscription'] else '🔴 Неактивен'}\n"
             f"Подписка: {user['subscription'] or 'нет'}\n"
-            f"Действует до: {expire}",
+            f"Действует до: {expire}\n"
+            f"⚡ Crypt4: <code>{happ_url}</code>",
             parse_mode="HTML",
             reply_markup=admin_menu_keyboard()
         )
