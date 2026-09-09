@@ -184,36 +184,104 @@ def read_no_servers():
     if not data:
         return ""
     return data["content"].strip()
+# ============================================================
+# HAPP SUBSCRIPTION HEADERS
+# ============================================================
+def datetime_to_unix(dt: datetime) -> int:
+    """
+    Перевод даты окончания подписки в Unix timestamp.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return int(
+        dt.astimezone(UTC).timestamp()
+    )
+def happ_headers(
+    user_id: int,
+    expires: datetime,
+    active: bool = True,
+):
+    """
+    Заголовки, которые Happ читает из подписки.
+    expire рассчитывается автоматически из expires.
+    """
+    expire_timestamp = datetime_to_unix(
+        expires
+    )
+    profile_title = (
+        f"MAGNET - {user_id}"
+    )
+    if active:
+        announce = (
+            "Подписка активна • 🧲 всё работает!"
+        )
+    else:
+        announce = (
+            "Подписка неактивна • 😞 сервера не работают"
+        )
+    return (
+        f"#profile-title: {profile_title}\n"
+        "#profile-update-interval: 1\n"
+        f"#subscription-userinfo: "
+        f"upload=0; download=0; total=0; "
+        f"expire={expire_timestamp}\n"
+        "#hide-settings: true\n"
+        "#happ-hide-settings: true\n"
+        "#hide_server_settings: true\n"
+        "#hidesettings: true\n"
+        f"#announce: {announce}\n"
+    )
+# ============================================================
+# SUBSCRIPTION CONTENT
+# ============================================================
 def generate_subscription_content(
     user_id: int,
     expires: datetime,
     active: bool = True,
 ):
-    if not active:
+    """
+    Формирует полный файл подписки.
+    Для активной подписки:
+    - MAGNET - user_id
+    - автоматический expire
+    - Happ settings скрыты
+    - активный announce
+    Для неактивной:
+    - тот же профиль
+    - expire = время окончания
+    - неактивный announce
+    - no_servers.txt
+    """
+    if expires.tzinfo is None:
+        expires = expires.replace(
+            tzinfo=UTC
+        )
+    if active:
+        servers = read_servers()
+        if not servers:
+            servers = (
+                "vless://unavailable@127.0.0.1:443"
+                "?security=none#MAGNET.NET"
+            )
+    else:
         servers = read_no_servers()
         if not servers:
             servers = (
                 "vless://expired@127.0.0.1:443"
                 "?security=none#MAGNET.NET"
             )
-        return (
-            f"# {SERVICE_NAME}\n"
-            "# SUBSCRIPTION EXPIRED\n"
-            f"# SUPPORT: {SUPPORT_USERNAME}\n"
-            f"{servers}\n"
-        )
-    servers = read_servers()
-    if not servers:
-        servers = (
-            "vless://unavailable@127.0.0.1:443"
-            "?security=none#MAGNET.NET"
-        )
+    headers = happ_headers(
+        user_id=user_id,
+        expires=expires,
+        active=active,
+    )
     return (
-        f"# {SERVICE_NAME}\n"
-        f"# ID: {user_id}\n"
-        f"# EXPIRE: {expires.isoformat()}\n"
-        f"# SUPPORT: {SUPPORT_USERNAME}\n"
-        f"{servers}\n"
+        headers
+        + f"# {SERVICE_NAME}\n"
+        + f"# ID: {user_id}\n"
+        + f"# EXPIRE: {expires.isoformat()}\n"
+        + f"# SUPPORT: {SUPPORT_USERNAME}\n"
+        + f"{servers}\n"
     )
 def parse_user_file(content: str):
     if not content:
@@ -239,6 +307,29 @@ def parse_user_file(content: str):
                     )
             except Exception:
                 pass
+    # Если старого # EXPIRE нет, пробуем
+    # достать expire из Happ-заголовка.
+    if expire is None:
+        for line in content.splitlines():
+            line = line.strip()
+            if line.startswith(
+                "#subscription-userinfo:"
+            ):
+                try:
+                    value = line.split(
+                        "expire=",
+                        1,
+                    )[1].split(
+                        ";",
+                        1,
+                    )[0].strip()
+                    timestamp = int(value)
+                    expire = datetime.fromtimestamp(
+                        timestamp,
+                        tz=UTC,
+                    )
+                except Exception:
+                    pass
     return {
         "expire": expire,
         "content": content,
@@ -305,9 +396,11 @@ def expire_user_if_needed(user_id: int):
         return subscription
     if expire > now_utc():
         return subscription
+    # Для истёкшей подписки используем
+    # фактическое время окончания, а не now.
     content = generate_subscription_content(
         user_id,
-        now_utc(),
+        expire,
         active=False,
     )
     github_put_file(
@@ -320,7 +413,7 @@ def expire_user_if_needed(user_id: int):
         "path": subscription["path"],
         "content": content,
         "sha": None,
-        "expire": now_utc(),
+        "expire": expire,
     }
 def has_active_subscription(user_id: int):
     subscription = expire_user_if_needed(
@@ -361,7 +454,7 @@ def get_subscription_url(
         user_id=user_id
     )
 # ============================================================
-# HAPP
+# HAPP CRYPT4
 # ============================================================
 def generate_happ_crypt4(
     user_id: int,
@@ -567,9 +660,12 @@ def revoke_subscription(
     )
     if not current:
         return False
+    expire = current["expire"]
+    if not expire:
+        expire = now_utc()
     content = generate_subscription_content(
         user_id,
-        now_utc(),
+        expire,
         active=False,
     )
     github_put_file(
@@ -1203,7 +1299,7 @@ async def successful_payment(
         )
     text += (
         "Ссылка автоматически обновляется "
-        "при изменении подписки."
+        "при изменении серверов."
     )
     await message.answer(
         text,
@@ -1324,9 +1420,14 @@ async def show_raw_link(
     subscription = expire_user_if_needed(
         user_id
     )
-    if not subscription or not has_active_subscription(
-        user_id
-    ):
+    if not subscription:
+        await callback.answer(
+            "Подписка неактивна.",
+            show_alert=True,
+        )
+        return
+    expire = subscription["expire"]
+    if not expire or expire <= now_utc():
         await callback.answer(
             "Подписка неактивна.",
             show_alert=True,
@@ -1427,7 +1528,9 @@ async def callback_back(
     callback: CallbackQuery,
 ):
     user_id = callback.from_user.id
-    promo_waiting.discard(user_id)
+    promo_waiting.discard(
+        user_id
+    )
     admin_states.pop(
         user_id,
         None,
@@ -1747,7 +1850,9 @@ async def admin_sync(
         if not subscription:
             continue
         expire = subscription["expire"]
-        if expire and expire > now_utc():
+        if not expire:
+            continue
+        if expire > now_utc():
             content = generate_subscription_content(
                 uid,
                 expire,
@@ -1757,6 +1862,19 @@ async def admin_sync(
                 subscription["path"],
                 content,
                 f"Sync subscription {uid}",
+                subscription["sha"],
+            )
+            updated += 1
+        else:
+            content = generate_subscription_content(
+                uid,
+                expire,
+                active=False,
+            )
+            github_put_file(
+                subscription["path"],
+                content,
+                f"Expire subscription {uid}",
                 subscription["sha"],
             )
             updated += 1
